@@ -3863,6 +3863,15 @@ app.registerExtension({
           case"r":case"R":e.preventDefault();e.stopPropagation();_sketchSetTool("rect");break;
           case"c":case"C":e.preventDefault();e.stopPropagation();_sketchSetTool("circle");break;
           case"v":case"V":e.preventDefault();e.stopPropagation();_sketchSetTool("move");break;
+          case"Delete":case"Backspace":
+            e.preventDefault();e.stopPropagation();
+            if(_sketchLayers.length>1){
+              _sketchSaveHistory();
+              _sketchLayers.splice(_sketchActiveLayer,1);
+              if(_sketchActiveLayer>=_sketchLayers.length) _sketchActiveLayer=_sketchLayers.length-1;
+              _sketchComposite();_sketchRebuildLayerUI();_sketchDrawBoundingBox();
+            }
+            break;
         }
       };
       document.addEventListener("keydown",_sketchKeyHandler,{capture:true});

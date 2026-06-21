@@ -5466,8 +5466,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       const seedInp=NI("seed",S.seed||0,0,999999999999,1,v=>{ S.seed=Math.round(v)||0; persist(); },"90px");
 
       // ── Advanced control panel ────────────────────────────────────────────
-      const SAMPLERS=["euler","euler_cfg_pp","euler_ancestral","euler_ancestral_cfg_pp","heun","heunpp2","exp_heun_2_x0","exp_heun_2_x0_sde","dpm_2","dpm_2_ancestral","lms","dpm_fast","dpm_adaptive","dpmpp_2s_ancestral","dpmpp_2s_ancestral_cfg_pp","dpmpp_sde","dpmpp_sde_gpu","dpmpp_2m","dpmpp_2m_cfg_pp","dpmpp_2m_sde","dpmpp_2m_sde_gpu","dpmpp_2m_sde_heun","dpmpp_2m_sde_heun_gpu","dpmpp_3m_sde","dpmpp_3m_sde_gpu","ddpm","lcm","ipndm","ipndm_v","deis","res_multistep","res_multistep_cfg_pp","res_multistep_ancestral","res_multistep_ancestral_cfg_pp","gradient_estimation","gradient_estimation_cfg_pp","er_sde","seeds_2","seeds_3","sa_solver","sa_solver_pece","ddim","uni_pc","uni_pc_bh2"];
-      const SCHEDULERS=["simple","sgm_uniform","karras","exponential","ddim_uniform","beta","normal","linear_quadratic","kl_optimal"];
+      let SAMPLERS=["euler","euler_cfg_pp","euler_ancestral","euler_ancestral_cfg_pp","heun","heunpp2","exp_heun_2_x0","exp_heun_2_x0_sde","dpm_2","dpm_2_ancestral","lms","dpm_fast","dpm_adaptive","dpmpp_2s_ancestral","dpmpp_2s_ancestral_cfg_pp","dpmpp_sde","dpmpp_sde_gpu","dpmpp_2m","dpmpp_2m_cfg_pp","dpmpp_2m_sde","dpmpp_2m_sde_gpu","dpmpp_2m_sde_heun","dpmpp_2m_sde_heun_gpu","dpmpp_3m_sde","dpmpp_3m_sde_gpu","ddpm","lcm","ipndm","ipndm_v","deis","res_multistep","res_multistep_cfg_pp","res_multistep_ancestral","res_multistep_ancestral_cfg_pp","gradient_estimation","gradient_estimation_cfg_pp","er_sde","seeds_2","seeds_3","sa_solver","sa_solver_pece","ddim","uni_pc","uni_pc_bh2"];
+      let SCHEDULERS=["simple","sgm_uniform","karras","exponential","ddim_uniform","beta","normal","linear_quadratic","kl_optimal"];
       const ADV_BORDER="rgba(100,80,180,.5)";
       const ADV_BG="rgba(26,20,60,.55)";
       const ADV_LABEL="rgba(160,140,220,.7)";
@@ -5490,6 +5490,25 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       };
       const samplerDD=_advDDStyle(DD(SAMPLERS,S.sampler,v=>{S.sampler=v;persist();}));
       const schedulerDD=_advDDStyle(DD(SCHEDULERS,S.scheduler,v=>{S.scheduler=v;persist();}));
+
+      // Fetch available samplers/schedulers from ComfyUI (includes custom node samplers)
+      api.fetchApi("/object_info/KSampler").then(r=>r.json()).then(d=>{
+        const info=d?.KSampler?.input?.required;
+        const slist=info?.sampler_name?.[0];
+        const schlist=info?.scheduler?.[0];
+        if(Array.isArray(slist)&&slist.length){
+          SAMPLERS=slist;
+          samplerDD.updateItems(slist);
+          if(slist.includes(S.sampler)) samplerDD.set(S.sampler);
+          else{ S.sampler=slist[0]; samplerDD.set(slist[0]); persist(); }
+        }
+        if(Array.isArray(schlist)&&schlist.length){
+          SCHEDULERS=schlist;
+          schedulerDD.updateItems(schlist);
+          if(schlist.includes(S.scheduler)) schedulerDD.set(S.scheduler);
+          else{ S.scheduler=schlist[0]; schedulerDD.set(schlist[0]); persist(); }
+        }
+      }).catch(()=>{});
 
 
       // Seed controls

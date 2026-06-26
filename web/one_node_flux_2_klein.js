@@ -425,14 +425,34 @@ function saveState(s){
 
 // ── Active refs for event handlers ────────────────────────────────────────────
 let _activeS=null, _activeShowFinal=null, _activeResetBtn=null, _activeShowError=null, _activePromptIdRef=null, _activeShowPreview=null;
+let _activePoseSkeleton=null; // POSE: called with the DWPose skeleton image URL (for before/after)
 
 // ── API events ────────────────────────────────────────────────────────────────
 (()=>{
   api.addEventListener("progress",(evt)=>{
     const {node,value,max}=evt.detail||{};
     if(!_activeS?.generating||!node) return;
+    // POSE: the DWPose preprocessor reports a single 1/1 progress step before the
+    // actual sampling. Show a clearer label so it doesn't look like "done at step 1".
+    if(node==="FKP:dwpose"){
+      if(_activeSetStage) _activeSetStage("Generating…","Analyzing pose…",0);
+      return;
+    }
     const pct=max>0?Math.round(value/max*100):0;
     if(_activeSetStage) _activeSetStage("Generating…",`Step ${value}/${max}`,pct);
+  });
+
+  // POSE: FKP:posepreview (PreviewImage on the DWPose output) emits the skeleton
+  // image. Stash its URL so the final result can offer a before(skeleton)/after.
+  api.addEventListener("executed",(evt)=>{
+    if(!_activeS?.generating) return;
+    const d=evt.detail||{};
+    if(d.node!=="FKP:posepreview") return;
+    const imgs=d.output?.images;
+    if(!imgs||!imgs.length) return;
+    const im=imgs[0];
+    const url=api.apiURL(`/view?filename=${encodeURIComponent(im.filename)}&type=${encodeURIComponent(im.type||"temp")}&subfolder=${encodeURIComponent(im.subfolder||"")}&t=${Date.now()}`);
+    _activePoseSkeleton?.(url);
   });
 
   api.addEventListener("execution_success",async()=>{
@@ -470,6 +490,7 @@ let _activeS=null, _activeShowFinal=null, _activeResetBtn=null, _activeShowError
     const url=URL.createObjectURL(blob);
     _activeShowPreview?.(url);
   });
+
 })();
 
 let _activeSetStage=null;
@@ -496,6 +517,7 @@ app.registerExtension({
         _activeResetBtn=cached.fns.resetBtn;
         _activeShowError=cached.fns.showError;
         _activeSetStage=cached.fns.setStage;
+        _activePoseSkeleton=cached.fns.poseSkeleton;
         _activePromptIdRef=cached.fns.getPromptId;
         this.addDOMWidget("fk_ui","div",cached.root,{
           getValue(){return null;},setValue(){},serialize:false,
@@ -562,12 +584,19 @@ app.registerExtension({
           fsLora:       saved.fsLora||"",       // faceswap: LoRA filename
           fsResizeLonger: saved.fsResizeLonger||0, // 0 = disabled, >0 = resize longer side to this px
           bgRemovalModel: saved.bgRemovalModel||"",  // birefnet model for remove bg
+          // Pose (RefControl): DWPose skeleton from pose image + reference -> result.
+          poseImage:    saved.poseImage||null,   // pose: the pose to copy (DWPose skeleton)
+          poseRef:      saved.poseRef||null,     // pose: appearance/content reference image
+          poseLora:     saved.poseLora||"",      // refcontrol poses LoRA
+          poseUseSizeSource: saved.poseUseSizeSource!==undefined?saved.poseUseSizeSource:"pose", // "pose"|"ref" badge
+          poseResizeLonger:  saved.poseResizeLonger||0,   // 0 = disabled, >0 = resize longer side
           // Prompt — shared (active pill's value) + per-pill storage
           prompt:       saved.prompt||"",
           promptT2i:    saved.promptT2i!==undefined?saved.promptT2i:((!saved.pill||saved.pill==="t2i")?saved.prompt||"":""),
           promptEdit:   saved.promptEdit!==undefined?saved.promptEdit:(saved.pill==="edit"?saved.prompt||"":""),
           promptPaint:  saved.promptPaint!==undefined?saved.promptPaint:(saved.pill==="inpaint"?saved.prompt||"":""),
           promptFs:     saved.promptFs!==undefined?saved.promptFs:(saved.pill==="faceswap"?saved.prompt||"":""),
+          promptPose:   saved.promptPose!==undefined?saved.promptPose:(saved.pill==="pose"?saved.prompt||"":""),
           // LoRAs
           userLoras:    saved.userLoras||[{name:"",strength:1.0},{name:"",strength:1.0},{name:"",strength:1.0}],
           // Generation state
@@ -592,7 +621,7 @@ app.registerExtension({
       const S=self._fk_S;
       // Sync S.prompt to the active pill's slot on init (covers first load before _pillPromptKey is available)
       {
-        const _initKey=S.pill==="edit"?"promptEdit":S.pill==="inpaint"?"promptPaint":S.pill==="faceswap"?"promptFs":S.pill==="i2i"?"promptI2i":"promptT2i";
+        const _initKey=S.pill==="edit"?"promptEdit":S.pill==="inpaint"?"promptPaint":S.pill==="faceswap"?"promptFs":S.pill==="pose"?"promptPose":S.pill==="i2i"?"promptI2i":"promptT2i";
         S.prompt=S[_initKey]||S.prompt||"";
         S[_initKey]=S.prompt;
       }
@@ -611,8 +640,10 @@ app.registerExtension({
           advancedUI:S.advancedUI, steps:S.steps, cfg:S.cfg, sampler:S.sampler, scheduler:S.scheduler, denoise:S.denoise,
           image1Name:S.image1Name, image2Name:S.image2Name,
           fsTarget:S.fsTarget, fsSource:S.fsSource, fsLora:S.fsLora, fsResizeLonger:S.fsResizeLonger, bgRemovalModel:S.bgRemovalModel,
+          poseImage:S.poseImage, poseRef:S.poseRef, poseLora:S.poseLora,
+          poseUseSizeSource:S.poseUseSizeSource, poseResizeLonger:S.poseResizeLonger,
           prompt:S.prompt, promptT2i:S.promptT2i, promptEdit:S.promptEdit,
-          promptPaint:S.promptPaint, promptFs:S.promptFs, promptI2i:S.promptI2i,
+          promptPaint:S.promptPaint, promptFs:S.promptFs, promptI2i:S.promptI2i, promptPose:S.promptPose,
           i2iImage:S.i2iImage, i2iDenoise:S.i2iDenoise, i2iResizeLonger:S.i2iResizeLonger,
           userLoras:S.userLoras, soundEnabled, extLoaders:S.extLoaders,
           downscaleRef:S.downscaleRef, downscaleRefMP:S.downscaleRefMP,
@@ -669,6 +700,17 @@ app.registerExtension({
           }catch(ex){}
           return S.resW;
         }
+        if(activePill==="pose"){
+          try{
+            const d=_poseImgDims._getDims();
+            // Pose badge off (scale mode) -> scale by longer side; on -> native size.
+            if(d.w&&d.h&&S.poseUseSizeSource!=="pose"&&S.poseResizeLonger>0){
+              return Math.round(d.w*(S.poseResizeLonger/Math.max(d.w,d.h))/16)*16;
+            }
+            return d.w||0;
+          }catch(ex){}
+          return S.resW;
+        }
         return S.isCustomRes?snapRes(S.customW):S.resW;
       };
       const getEffectiveH=()=>{
@@ -698,6 +740,16 @@ app.registerExtension({
             const d=_fsTargetDims._getDims();
             if(d.w&&d.h&&!_fsUseOrigSize&&S.fsResizeLonger>0){
               return Math.round(d.h*(S.fsResizeLonger/Math.max(d.w,d.h))/16)*16;
+            }
+            return d.h||0;
+          }catch(ex){}
+          return S.resH;
+        }
+        if(activePill==="pose"){
+          try{
+            const d=_poseImgDims._getDims();
+            if(d.w&&d.h&&S.poseUseSizeSource!=="pose"&&S.poseResizeLonger>0){
+              return Math.round(d.h*(S.poseResizeLonger/Math.max(d.w,d.h))/16)*16;
             }
             return d.h||0;
           }catch(ex){}
@@ -928,9 +980,11 @@ app.registerExtension({
         return window.__fkCustomTriggers[base]||"";
       };
 
-      // Row 2: Faceswap LoRA + Remove BG model
-      const modGrid2=mk("div",{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px",marginBottom:"16px"});
+      // ── Workflow LoRAs box ────────────────────────────────────────────────
+      // The three LoRAs used internally by the mode workflows (Faceswap, and the
+      // two Pose phases) grouped in one subtly bordered box so it reads as a unit.
       const fsLoraF=mkModDD("Faceswap LoRA","/models/loras",S.fsLora,v=>{S.fsLora=v;persist();});
+      const poseLoraF=mkModDD("Pose LoRA","/models/loras",S.poseLora||"none",v=>{S.poseLora=v==="none"?"":v;persist();});
       const bgF=mkModDD("Remove BG Model","models/background_removal","none",v=>{S.bgRemovalModel=v==="none"?"":v;persist();});
       api.fetchApi("/flux_klein/bgremoval_models").then(r=>r.json()).then(d=>{
         const models=d.models||[];
@@ -938,7 +992,14 @@ app.registerExtension({
         if(S.bgRemovalModel&&models.includes(S.bgRemovalModel)) bgF.dd.set(S.bgRemovalModel);
         else bgF.dd.set("none");
       }).catch(()=>{});
-      modGrid2.append(fsLoraF.wrap,bgF.wrap,mk("div"));
+
+      const _loraBox=mk("div",{
+        border:`1px solid ${C.border}`,borderRadius:"8px",padding:"10px",
+        marginBottom:"16px",background:"rgba(255,255,255,.012)",
+      });
+      const _loraBoxGrid=mk("div",{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px"});
+      _loraBoxGrid.append(fsLoraF.wrap,poseLoraF.wrap,bgF.wrap);
+      _loraBox.append(_loraBoxGrid);
 
       // ── Preferences ───────────────────────────────────────────────────────
       const prefTitle=mk("div",{fontSize:"10px",fontWeight:"700",letterSpacing:".1em",
@@ -1037,7 +1098,7 @@ app.registerExtension({
       _dsRow.append(_dsTop,_dsHint);
       _dsApplyEnabled();
 
-      settingsOverlay.append(settHdr,modGrid,_kvNote,_baseNote,modGrid2,prefTitle,soundToggle.el,advUIToggle.el,extLoadersToggle.el,_dsRow);
+      settingsOverlay.append(settHdr,modGrid,_kvNote,_baseNote,_loraBox,prefTitle,soundToggle.el,advUIToggle.el,extLoadersToggle.el,_dsRow);
 
       // ── Overlay helpers ───────────────────────────────────────────────────
       const openOverlay=(el)=>{
@@ -1390,11 +1451,12 @@ app.registerExtension({
       const pillEdit    =Pill("EDIT",    activePill==="edit",     ()=>setPill("edit"));
       const pillInpaint =Pill("PAINT",   activePill==="inpaint",  ()=>setPill("inpaint"));
       const pillFaceswap=Pill("FACESWAP",activePill==="faceswap", ()=>setPill("faceswap"));
-      topBarLeft.append(pillT2I,pillI2I,pillEdit,pillInpaint,pillFaceswap);
+      const pillPose    =Pill("POSE",    activePill==="pose",     ()=>setPill("pose"));
+      topBarLeft.append(pillT2I,pillI2I,pillEdit,pillInpaint,pillFaceswap,pillPose);
 
       let _promptTARef=null; // set after promptTA is created
 
-      const _pillPromptKey=(p)=>p==="t2i"?"promptT2i":p==="edit"?"promptEdit":p==="inpaint"?"promptPaint":p==="i2i"?"promptI2i":"promptFs";
+      const _pillPromptKey=(p)=>p==="t2i"?"promptT2i":p==="edit"?"promptEdit":p==="inpaint"?"promptPaint":p==="i2i"?"promptI2i":p==="pose"?"promptPose":"promptFs";
 
       function setPill(p){
         // Save current prompt to old pill's slot before switching
@@ -1411,13 +1473,14 @@ app.registerExtension({
         S.prompt=S[_pillPromptKey(p)];
         if(_promptTARef){ _promptTARef.value=S.prompt; if(typeof _promptOvTA!=="undefined"&&_promptOvTA) _promptOvTA.value=S.prompt; }
         persist();
-        [pillT2I,pillI2I,pillEdit,pillInpaint,pillFaceswap].forEach(b=>{
+        [pillT2I,pillI2I,pillEdit,pillInpaint,pillFaceswap,pillPose].forEach(b=>{
           const isActive=
             (b===pillT2I&&p==="t2i")||
             (b===pillI2I&&p==="i2i")||
             (b===pillEdit&&p==="edit")||
             (b===pillInpaint&&p==="inpaint")||
-            (b===pillFaceswap&&p==="faceswap");
+            (b===pillFaceswap&&p==="faceswap")||
+            (b===pillPose&&p==="pose");
           b.style.background=isActive?LIME:C.bg2;
           b.style.color=isActive?"#111":C.text;
           b.style.borderColor=isActive?LIME:C.border;
@@ -5953,6 +6016,11 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       };
       const _fsTargetDims=_mkFsDimsLbl();
       const _fsSourceDims=_mkFsDimsLbl();
+      // Source badge is display-only (only Target drives size). Plain, no border/bg
+      // so it's clear it isn't clickable.
+      _fsSourceDims.style.background="transparent";
+      _fsSourceDims.style.border="none";
+      _fsSourceDims.style.color=C.muted;
 
       // ── Resize by longer side ─────────────────────────────────────────────
       // _fsUseOrigSize=true (default): badge LIME, resize row locked
@@ -6096,7 +6164,154 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       if(S.fsTarget) _fsTargetSlot._restorePreview(S.fsTarget);
       if(S.fsSource) _fsSourceSlot._restorePreview(S.fsSource);
 
-      leftPanel.append(i2iPanel,editPanel,inpaintPanel,faceswapPanel,resSect,advPanel,seedRow,_seedLockedWarn,genRow);
+      // ── POSE panel (RefControl, single-phase) ────────────────────────────────
+      // Pose image → DWPose skeleton (structure) + Reference image (appearance) →
+      // refcontrol poses LoRA → result. Output size from the active badge (default
+      // Pose) + optional "Scale by longer side" override — same UX as FACESWAP/EDIT.
+      const posePanel=mk("div",{display:"none",flexDirection:"column",gap:"6px"});
+
+      const _poseImgDims=_mkFsDimsLbl();
+      const _poseRefDims=_mkFsDimsLbl();
+
+      // Which slot drives the output size: always "pose" or "ref" (default ref).
+      // One badge is ALWAYS selected; the Scale field is always live and scales the
+      // selected image by its longer side. Picking a badge prefills the field with
+      // that image's longer side, so the default = the chosen image's native size.
+      // Output size always comes from the POSE image (so the DWPose skeleton and the
+      // generated result share the same aspect ratio). The Pose badge is a toggle:
+      //   active  -> use the pose image's native size, Scale field locked
+      //   off     -> Scale by longer side unlocks and scales the pose image
+      // The Reference badge only displays dims; it never drives the output size.
+      if(S.poseUseSizeSource!=="pose"&&S.poseUseSizeSource!==null) S.poseUseSizeSource="pose";
+
+      const _poseResizePreview=mk("span",{fontSize:"9px",fontWeight:"700",color:LIME,letterSpacing:".03em",whiteSpace:"nowrap"});
+      const _poseResizeLongerInp=NI("px",S.poseResizeLonger||1024,64,8192,8,v=>{
+        S.poseResizeLonger=Math.round(v)||1024;
+        _poseResizeUpdatePreview();
+        persist();
+      },52);
+
+      const _poseResizeRow=mk("div",{display:"none",alignItems:"center",gap:"6px",marginTop:"2px"});
+      const _poseResizeRowLbl=mk("span",{fontSize:"8px",color:C.muted,whiteSpace:"nowrap",flexShrink:"0"});
+      tx(_poseResizeRowLbl,"Scale by longer side");
+      _poseResizeRow.append(_poseResizeRowLbl,_poseResizeLongerInp,_poseResizePreview);
+
+      function _poseResizeUpdatePreview(){
+        const dims=_poseImgDims._getDims();
+        if(S.poseResizeLonger>0&&dims.w&&dims.h){
+          const scale=S.poseResizeLonger/Math.max(dims.w,dims.h);
+          const nw=Math.round(dims.w*scale/16)*16;
+          const nh=Math.round(dims.h*scale/16)*16;
+          tx(_poseResizePreview,`→ ${nw}×${nh}`);
+        } else { tx(_poseResizePreview,""); }
+      }
+
+      // Pose badge active = native pose size (scale locked); off = scale unlocks and
+      // is prefilled with the pose image's longer side.
+      function _poseApplyBadges(){
+        const pd=_poseImgDims._getDims();
+        const active=S.poseUseSizeSource==="pose";
+        if(pd.w&&pd.h){
+          _poseImgDims.style.cursor="pointer";
+          if(active){
+            _poseImgDims.style.color=LIME; _poseImgDims.style.background="rgba(240,255,65,.13)";
+            _poseImgDims.style.borderColor="rgba(240,255,65,.5)";
+            _poseImgDims.title="Output uses the pose image's native size — click to unlock Scale by longer side";
+          } else {
+            _poseImgDims.style.color=C.text; _poseImgDims.style.background=C.bg3;
+            _poseImgDims.style.borderColor=C.borderH;
+            _poseImgDims.title="Click to use the pose image's native size (locks Scale)";
+          }
+        } else { _poseImgDims.style.cursor="default"; _poseImgDims.title=""; }
+        // Reference badge is display-only (never a size source): plain, no border/bg
+        // so it's visually clear it isn't clickable.
+        _poseRefDims.style.cursor="default"; _poseRefDims.title="";
+        _poseRefDims.style.color=C.muted; _poseRefDims.style.background="transparent"; _poseRefDims.style.border="none";
+
+        const locked=active;
+        _poseResizeRow.style.display=(pd.w&&pd.h)?"flex":"none";
+        _poseResizeRow.style.opacity=locked?"0.35":"1";
+        _poseResizeRow.style.pointerEvents=locked?"none":"auto";
+        if(_poseResizeLongerInp._inp) _poseResizeLongerInp._inp.disabled=locked;
+        _poseResizeUpdatePreview();
+      }
+
+      // Prefill the scale field with the pose image's longer side.
+      const _posePrefillScale=()=>{
+        const d=_poseImgDims._getDims();
+        if(d.w&&d.h){ const longer=Math.max(d.w,d.h); S.poseResizeLonger=longer; _poseResizeLongerInp.setVal(longer); persist(); }
+      };
+
+      const _poseImgDimsSet=_poseImgDims._set.bind(_poseImgDims);
+      _poseImgDims._set=(w,h)=>{ _poseImgDimsSet(w,h);
+        if(w&&h&&!(+S.poseResizeLonger>0)) _posePrefillScale();
+        _poseApplyBadges(); };
+      const _poseRefDimsSet=_poseRefDims._set.bind(_poseRefDims);
+      _poseRefDims._set=(w,h)=>{ _poseRefDimsSet(w,h); _poseApplyBadges(); };
+
+      // Pose badge toggles native-size <-> scale mode. Reference badge is not clickable.
+      _poseImgDims.onclick=()=>{ const d=_poseImgDims._getDims(); if(!d.w||!d.h) return;
+        if(S.poseUseSizeSource==="pose"){ S.poseUseSizeSource=null; if(!(+S.poseResizeLonger>0)) _posePrefillScale(); }
+        else { S.poseUseSizeSource="pose"; }
+        persist(); _poseApplyBadges(); };
+
+      const _poseSlotRow=mk("div",{display:"flex",gap:"10px",alignItems:"flex-start"});
+
+      const _poseImgCard=mk("div",{display:"flex",flexDirection:"column",gap:"3px",alignItems:"center"});
+      const _poseImgSlot=ImgSlot(false,(name)=>{
+        S.poseImage=name||null;
+        if(name){ _poseImgSlot.el.style.borderColor=""; tx(_poseImgLbl,"Pose"); _poseImgLbl.style.color=C.muted; }
+        persist();
+      },(w,h)=>_poseImgDims._set(w,h));
+      const _poseImgLbl=mk("div",{fontSize:"8px",fontWeight:"700",color:C.muted,
+        textTransform:"uppercase",letterSpacing:".07em",textAlign:"center"});
+      tx(_poseImgLbl,"Pose");
+      _poseImgCard.append(_poseImgSlot.el,_poseImgLbl,_poseImgDims);
+
+      const _poseRefCard=mk("div",{display:"flex",flexDirection:"column",gap:"3px",alignItems:"center"});
+      const _poseRefSlot=ImgSlot(false,(name)=>{
+        S.poseRef=name||null;
+        if(name){ _poseRefSlot.el.style.borderColor=""; tx(_poseRefLbl,"Reference"); _poseRefLbl.style.color=C.muted; }
+        persist();
+      },(w,h)=>_poseRefDims._set(w,h));
+      const _poseRefLbl=mk("div",{fontSize:"8px",fontWeight:"700",color:C.muted,
+        textTransform:"uppercase",letterSpacing:".07em",textAlign:"center"});
+      tx(_poseRefLbl,"Reference");
+      _poseRefCard.append(_poseRefSlot.el,_poseRefLbl,_poseRefDims);
+
+      const _poseSwapBtn=mk("button",{
+        background:"transparent",border:`1px solid ${C.border}`,borderRadius:"6px",
+        width:"24px",height:"24px",padding:"0",cursor:"pointer",color:C.muted,outline:"none",
+        flexShrink:"0",marginTop:"32px",
+        display:"flex",alignItems:"center",justifyContent:"center",lineHeight:"0",
+        transition:"border-color .15s,color .15s",
+      });
+      _poseSwapBtn.title="Swap Pose ↔ Reference";
+      _poseSwapBtn.innerHTML=`<svg viewBox="0 0 10 14" width="9" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 1L1 3.5L3 6"/><line x1="1" y1="3.5" x2="9" y2="3.5"/><path d="M7 8L9 10.5L7 13"/><line x1="9" y1="10.5" x2="1" y2="10.5"/></svg>`;
+      _poseSwapBtn.onmouseenter=()=>{_poseSwapBtn.style.borderColor=LIME;_poseSwapBtn.style.color=LIME;};
+      _poseSwapBtn.onmouseleave=()=>{_poseSwapBtn.style.borderColor=C.border;_poseSwapBtn.style.color=C.muted;};
+      _poseSwapBtn.onclick=()=>{
+        const np=S.poseImage,nr=S.poseRef;
+        S.poseImage=nr||null;S.poseRef=np||null;
+        _poseImgSlot._restorePreview(S.poseImage);
+        _poseRefSlot._restorePreview(S.poseRef);
+        const dp=_poseImgDims._getDims(),dr=_poseRefDims._getDims();
+        _poseImgDims._set(dr.w||0,dr.h||0);
+        _poseRefDims._set(dp.w||0,dp.h||0);
+        if(S.poseImage){ _poseImgSlot.el.style.borderColor=""; tx(_poseImgLbl,"Pose"); _poseImgLbl.style.color=C.muted; }
+        if(S.poseRef){ _poseRefSlot.el.style.borderColor=""; tx(_poseRefLbl,"Reference"); _poseRefLbl.style.color=C.muted; }
+        persist();
+      };
+
+      _poseSlotRow.append(_poseImgCard,_poseSwapBtn,_poseRefCard);
+
+      posePanel.append(_poseSlotRow,_poseResizeRow);
+
+      // Restore pose slots from state
+      if(S.poseImage) _poseImgSlot._restorePreview(S.poseImage);
+      if(S.poseRef)   _poseRefSlot._restorePreview(S.poseRef);
+
+      leftPanel.append(i2iPanel,editPanel,inpaintPanel,faceswapPanel,posePanel,resSect,advPanel,seedRow,_seedLockedWarn,genRow);
 
       // ── RIGHT PANEL — Preview area fills available height ──
       const rightPanel=mk("div",{flex:"1",minWidth:"0",display:"flex",flexDirection:"column",overflow:"hidden"});
@@ -6221,7 +6436,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
 
       // "Use as…" dropdown — top-right of previewBox, visible after generation
       const previewUseWrap=mk("div",{
-        position:"absolute",top:"10px",right:"10px",zIndex:"5",display:"none",
+        position:"absolute",top:"10px",right:"10px",zIndex:"6",display:"none",
       });
       const previewUseBtn=mk("button",{
         background:"rgba(20,20,20,.88)",color:"rgba(255,255,255,.88)",
@@ -6240,11 +6455,13 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       const previewUseDrop=mk("div",{
         position:"absolute",top:"calc(100% + 4px)",right:"0",
         background:C.bg1,border:`1px solid ${C.borderH}`,borderRadius:"8px",
-        minWidth:"160px",overflow:"hidden",display:"none",zIndex:"200",
-        boxShadow:"0 4px 20px rgba(0,0,0,.7)",flexDirection:"column",
+        minWidth:"150px",overflowY:"auto",overflowX:"hidden",display:"none",zIndex:"200",
+        maxHeight:"min(360px, 70vh)",boxShadow:"0 4px 20px rgba(0,0,0,.7)",flexDirection:"column",
+        scrollbarWidth:"thin",scrollbarColor:`${C.border} transparent`,
       });
-      const _mkPUSection=(label)=>{ const h=mk("div",{padding:"6px 12px 3px",fontSize:"8px",fontWeight:"700",letterSpacing:".08em",textTransform:"uppercase",color:C.muted,userSelect:"none"});tx(h,label);return h; };
-      const _mkPUItem=(label,icon,fn)=>{ const row=mk("div",{padding:"7px 12px",fontSize:"10px",fontWeight:"500",color:C.text,cursor:"pointer",display:"flex",alignItems:"center",gap:"7px",transition:"background .1s,color .1s",userSelect:"none"});const ico=mk("span",{fontSize:"11px",width:"14px",textAlign:"center",flexShrink:"0",color:C.muted});tx(ico,icon);const lbl=mk("span");tx(lbl,label);row.append(ico,lbl);row.onmouseenter=()=>{row.style.background="rgba(240,255,65,.10)";row.style.color=LIME;ico.style.color=LIME;};row.onmouseleave=()=>{row.style.background="";row.style.color=C.text;ico.style.color=C.muted;};row.onclick=()=>{previewUseDrop.style.display="none";_puDropOpen=false;fn();};return row; };
+      // Compact rows so the whole list (incl. Pose) fits without overflowing.
+      const _mkPUSection=(label)=>{ const h=mk("div",{padding:"5px 12px 2px",fontSize:"8px",fontWeight:"700",letterSpacing:".08em",textTransform:"uppercase",color:C.muted,userSelect:"none"});tx(h,label);return h; };
+      const _mkPUItem=(label,icon,fn)=>{ const row=mk("div",{padding:"5px 12px",fontSize:"10px",fontWeight:"500",color:C.text,cursor:"pointer",display:"flex",alignItems:"center",gap:"7px",transition:"background .1s,color .1s",userSelect:"none"});const ico=mk("span",{fontSize:"11px",width:"14px",textAlign:"center",flexShrink:"0",color:C.muted});tx(ico,icon);const lbl=mk("span");tx(lbl,label);row.append(ico,lbl);row.onmouseenter=()=>{row.style.background="rgba(240,255,65,.10)";row.style.color=LIME;ico.style.color=LIME;};row.onmouseleave=()=>{row.style.background="";row.style.color=C.text;ico.style.color=C.muted;};row.onclick=()=>{previewUseDrop.style.display="none";_puDropOpen=false;fn();};return row; };
       const _mkPUDivider=()=>mk("div",{height:"1px",background:C.border,margin:"2px 0"});
 
       const _getLastSrc=()=>_lastGenObj||(_galImages&&_galImages[0]);
@@ -6264,6 +6481,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _mkPUSection("Faceswap"),
         _mkPUItem("Target","◎",()=>_puUpload(n=>{setPill("faceswap");S.fsTarget=n;_fsTargetSlot._restorePreview(n);persist();})),
         _mkPUItem("Source","◈",()=>_puUpload(n=>{setPill("faceswap");S.fsSource=n;_fsSourceSlot._restorePreview(n);persist();})),
+        _mkPUDivider(),
+        _mkPUSection("Pose"),
+        _mkPUItem("Pose","◇",()=>_puUpload(n=>{setPill("pose");S.poseImage=n;_poseImgSlot._restorePreview(n);persist();})),
+        _mkPUItem("Reference","◈",()=>_puUpload(n=>{setPill("pose");S.poseRef=n;_poseRefSlot._restorePreview(n);persist();})),
       );
 
       let _puDropOpen=false;
@@ -6829,7 +7050,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         display:"flex",alignItems:"center",gap:"5px",borderRadius:"5px",
         transition:"color .15s,border-color .15s",flexShrink:"0",
       });
-      _promptExpandBtn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg><span style="font-size:9px;font-weight:700;letter-spacing:.04em">Expand prompt</span>`;
+      _promptExpandBtn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg><span style="font-size:9px;font-weight:700;letter-spacing:.04em">Expand</span>`;
       _promptExpandBtn.onmouseenter=()=>{ _promptExpandBtn.style.color="#fff";_promptExpandBtn.style.borderColor="#555"; };
       _promptExpandBtn.onmouseleave=()=>{ _promptExpandBtn.style.color=C.muted;_promptExpandBtn.style.borderColor=C.border; };
 
@@ -6976,6 +7197,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         ]},
         faceswap:{categories:[
           {cat:"FACE SWAP (make sure you have a Faceswap LoRA selected in Settings)",items:[{label:"Head swap",prompt:"Replace the head in image 1 with the head from image 2, adapting the facial features to match the artistic style, focus, and environmental lighting of the image 1."}]},
+        ]},
+        pose:{categories:[
+          {cat:"POSE",items:[{label:"Apply pose",prompt:"apply pose from image 1 with reference from image 2"}]},
         ]},
       };
 
@@ -7808,6 +8032,19 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         finalImg.style.display="block";
       };
 
+      // POSE: the DWPose skeleton is ready (phase before sampling). Show it live in
+      // the preview as a milestone, and stash its URL so showFinal can build a
+      // before(skeleton)/after(result) comparer once the result arrives.
+      let _poseSkeletonUrl=null;
+      const poseSkeleton=(url)=>{
+        _poseSkeletonUrl=url;
+        placeholder.style.display="none";
+        comparerWrap.style.display="none";
+        finalImg.src=url;
+        finalImg.style.display="block";
+        if(_activeSetStage) _activeSetStage("Generating…","Pose detected, generating…",10);
+      };
+
       const showFinal=(url,filename,subfolder)=>{
         if(_previewBlobUrl){ URL.revokeObjectURL(_previewBlobUrl); _previewBlobUrl=null; }
         clearError();S.generating=false;S.previewUrl=null;_activePromptId=null;persist();
@@ -7835,12 +8072,24 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           previewUseWrap.style.display="block";
           _cmpSetPct(100);
         };
+        // before/after where the "before" is an arbitrary URL (e.g. POSE skeleton).
+        const _showComparerUrl=(beforeUrl)=>{
+          finalImg.style.display="none";
+          comparerGenImg.src=url;
+          comparerGenImg.style.width=(previewBox.offsetWidth||620)+"px";
+          comparerBase.src=beforeUrl;
+          comparerWrap.style.display="block";
+          previewUseWrap.style.display="block";
+          _cmpSetPct(100);
+        };
         // Use snapshot mode/image so switching pills mid-generation doesn't corrupt comparer
         const _snapMode=S._pendingMeta?.mode||activePill;
         const _snapImg1=S._pendingMeta?.image1||null;
         const _isSketchResult=_snapMode==="sketch"&&_snapImg1;
         const _isPaintResult=(_snapMode==="inpaint"||_snapMode==="outpaint")&&_snapImg1;
-        if(_snapMode==="edit"&&_snapImg1){
+        if(_snapMode==="pose"&&_poseSkeletonUrl){
+          _showComparerUrl(_poseSkeletonUrl); // before = DWPose skeleton, after = result
+        } else if(_snapMode==="edit"&&_snapImg1){
           _showComparer(_snapImg1);
         } else if(_isSketchResult||_isPaintResult){
           _showComparer(_snapImg1);
@@ -7859,7 +8108,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       const _slotErr=(slot,lbl)=>{ slot.el.style.borderColor="#e05555"; tx(lbl,"Required!"); lbl.style.color="#e05555"; };
 
       genBtn.onclick=async()=>{
-        if(!S.prompt.trim()&&activePill!=="faceswap"){showError("Please enter a prompt.");return;}
+        // Empty prompt is allowed in every mode — at worst it just doesn't change the
+        // image (Edit/I2I) or produces something generic (T2I); nothing breaks.
         if(activePill==="inpaint"){
           if(_paintMode==="sketch"){
             if(!_paintSlot.hasFile()){ _slotErr(_paintSlot,_paintSlotLbl); return; }
@@ -7877,10 +8127,15 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           if(!_fsSourceSlot.hasFile()){_slotErr(_fsSourceSlot,_fsSourceLbl);return;}
           if(!S.fsLora||S.fsLora==="none") {showError("FACESWAP: select a Faceswap LoRA in Settings.");return;}
         }
+        if(activePill==="pose"){
+          if(!_poseImgSlot.hasFile()){_slotErr(_poseImgSlot,_poseImgLbl);return;}
+          if(!_poseRefSlot.hasFile()){_slotErr(_poseRefSlot,_poseRefLbl);return;}
+          if(!S.poseLora||S.poseLora==="none"){showError("POSE: select a Pose LoRA in Settings.");return;}
+        }
         const _hasExtModel=(()=>{ const n=app.graph.getNodeById(self.id); const inputs=n?.inputs||[]; const slot=inputs.find(i=>i.name==="model"); return slot?.link!=null; })();
         if(!S.model&&!_hasExtModel){showError("No model selected. Open Settings and choose a model.");return;}
 
-        clearError();S.generating=true;
+        clearError();S.generating=true;_poseSkeletonUrl=null;
 
         // Snapshot all meta-relevant state at click time so mid-generation UI changes don't corrupt metadata
         const _isSketchSnap=activePill==="inpaint"&&_paintMode==="sketch";
@@ -7898,9 +8153,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           prompt:S.prompt,
           w:getEffectiveW(), h:getEffectiveH(),
           mode:_snapMode,
-          image1:activePill==="i2i"?(S.i2iImage||null):(_isPaintSnap?(_paintSlot.name||null):(_isFaceswapSnap?(S.fsTarget||null):(activePill==="edit"?(S.image1Name||null):null))),
+          image1:activePill==="i2i"?(S.i2iImage||null):(_isPaintSnap?(_paintSlot.name||null):(_isFaceswapSnap?(S.fsTarget||null):(activePill==="pose"?(S.poseRef||null):(activePill==="edit"?(S.image1Name||null):null)))),
           i2iDenoise:activePill==="i2i"?S.i2iDenoise:undefined,
-          image2:(_isFaceswapSnap?(S.fsSource||null):(activePill==="edit"?(S.image2Name||null):null)),
+          image2:(_isFaceswapSnap?(S.fsSource||null):(activePill==="pose"?(S.poseImage||null):(activePill==="edit"?(S.image2Name||null):null))),
           mask:_isInpaintSnap?(_maskName||null):null,
           outpaintExpand:_isOutpaintSnap?{top:_opTop,right:_opRight,bottom:_opBottom,left:_opLeft}:null,
           useSizeSource:(activePill==="edit")?(_useSizeSource||null):null,
@@ -7942,11 +8197,13 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         const isOutpaintMode=activePill==="inpaint"&&_paintMode==="inpaint"&&_maskName==="__outpaint__";
         const isFaceswapMode=activePill==="faceswap";
         const isI2IMode=activePill==="i2i";
+        const isPoseMode=activePill==="pose";
         let wfUrl;
         if(activePill==="edit"||isSketchMode) wfUrl="/flux_klein/workflow_edit";
         else if(isInpaintMode) wfUrl="/flux_klein/workflow_inpaint";
         else if(isOutpaintMode) wfUrl="/flux_klein/workflow_outpaint";
         else if(isFaceswapMode) wfUrl="/flux_klein/workflow_faceswap";
+        else if(isPoseMode) wfUrl="/flux_klein/workflow_pose";
         else if(isI2IMode) wfUrl="/flux_klein/workflow_i2i";
         else wfUrl="/flux_klein/workflow_t2i";
 
@@ -8230,6 +8487,116 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           const fsLoRaRef=_applyLoRAs("FKF:226","FKF:");
           set(WFF.sampling,"model",typeof fsLoRaRef==="string"?[fsLoRaRef,0]:fsLoRaRef);
 
+        } else if(isPoseMode){
+          // ── POSE workflow patching (RefControl, single-phase) ─────────────
+          // Pose image -> DWPose skeleton (structure); Reference image (appearance).
+          // Both feed the refcontrol poses LoRA via dual ReferenceLatent chains.
+          const WFP={
+            clip:"FKP:clip", vae:"FKP:vae", unet:"FKP:unet", lora:"FKP:lora",
+            poseImg:"FKP:poseimg", refImg:"FKP:refimg",
+            poseScale:"FKP:posescale", refScale:"FKP:refscale",
+            prompt:"FKP:prompt", guider:"FKP:guider", sampler:"FKP:sampler",
+            sched:"FKP:sched", noise:"FKP:noise", size:"FKP:size", save:"FKP:save",
+          };
+
+          // Loaders — honour external model/clip/vae inputs.
+          if(extModel){ delete prompt[WFP.unet]; prompt[WFP.lora].inputs.model=extModel; }
+          else set(WFP.unet,"unet_name",S.model||"flux-2-klein-9b.safetensors");
+          if(extClip){ delete prompt[WFP.clip]; prompt[WFP.prompt].inputs.clip=extClip; }
+          else set(WFP.clip,"clip_name",S.textEncoder||"qwen_3_8b_fp8mixed.safetensors");
+          if(extVae){
+            delete prompt[WFP.vae];
+            ["FKP:poseenc","FKP:refenc","FKP:decode"].forEach(id=>{ if(prompt[id]) prompt[id].inputs.vae=extVae; });
+          } else set(WFP.vae,"vae_name",S.vae||"flux2-vae.safetensors");
+
+          set(WFP.poseImg,"image",S.poseImage||"placeholder.png");
+          set(WFP.refImg, "image",S.poseRef||"placeholder.png");
+          set(WFP.save,   "filename_prefix","one-node-flux-2-klein/FK");
+
+          // DWPose detect resolution = the pose image's shorter side (snapped to 64),
+          // so the skeleton keeps the pose image's resolution/aspect instead of the
+          // default 512. Clamped to a sane range.
+          {
+            const pd=_poseImgDims._getDims();
+            if(pd.w&&pd.h){
+              let res=Math.round(Math.min(pd.w,pd.h)/64)*64;
+              res=Math.max(512,Math.min(2048,res));
+              set("FKP:dwpose","resolution",res);
+            }
+          }
+
+          // Resolve the refcontrol poses LoRA against the model list (handles subfolders).
+          const _ndl=(s)=>(s||"").replace(/\\/g,"/").toLowerCase();
+          const _resolveLora=(want)=>{
+            if(!want) return want;
+            return (_loraList||[]).find(o=>_ndl(o)===_ndl(want))||
+              (_loraList||[]).find(o=>_ndl(o).split("/").pop()===_ndl(want).split("/").pop())||want;
+          };
+          set(WFP.lora,"lora_name",_resolveLora(S.poseLora));
+
+          // Prompt: the refcontrol trigger phrase must always be present (it activates
+          // the pose LoRA). The user's text, if any, is appended after it — so an empty
+          // prompt box still works, and a custom description never drops the trigger.
+          const _POSE_TRIGGER="apply pose from image 1 with reference from image 2";
+          let _posePrompt=_POSE_TRIGGER;
+          const _ut=_effectivePrompt.trim();
+          if(_ut){
+            _posePrompt=/apply pose from image 1 with reference from image 2/i.test(_ut)
+              ? _ut                       // user already included the trigger
+              : _POSE_TRIGGER+". "+_ut;    // prepend the trigger
+          }
+          set(WFP.prompt,"text",_posePrompt);
+
+          // Downscale toggle: control the scale-node megapixels, or bypass them.
+          // The pose scale takes the DWPose skeleton; bypass feeds raw skeleton/ref.
+          if(S.downscaleRef){
+            const mp=+(S.downscaleRefMP)>0?+(S.downscaleRefMP):1.0;
+            set(WFP.poseScale,"megapixels",mp);
+            set(WFP.refScale,"megapixels",mp);
+          } else {
+            if(prompt["FKP:poseenc"]) prompt["FKP:poseenc"].inputs.pixels=["FKP:dwpose",0];
+            if(prompt[WFP.size]) prompt[WFP.size].inputs.image=["FKP:dwpose",0];
+            if(prompt["FKP:refenc"]) prompt["FKP:refenc"].inputs.pixels=[WFP.refImg,0];
+            delete prompt[WFP.poseScale]; delete prompt[WFP.refScale];
+          }
+
+          // Output size MUST match the skeleton that drives the pose conditioning,
+          // otherwise the pose won't line up (shifted / wrong scale). So we never
+          // override the latent dims directly — we let GetImageSize read the scaled
+          // skeleton (FKP:size <- FKP:posescale). The badge/scale only changes HOW
+          // MUCH the skeleton (and reference) get scaled, via the megapixels value:
+          //   - Pose badge active  -> use the pose image's native megapixels
+          //   - Pose badge off     -> scale so the longer side = poseResizeLonger
+          // The downscale toggle above may already set a fixed megapixels; the pose
+          // size choice takes precedence here when set.
+          {
+            const pd=_poseImgDims._getDims();
+            if(pd.w&&pd.h&&prompt[WFP.poseScale]){
+              let targetLonger;
+              if(S.poseUseSizeSource==="pose"){
+                targetLonger=Math.max(pd.w,pd.h); // native size
+              } else if(S.poseResizeLonger>0){
+                targetLonger=S.poseResizeLonger;  // scale by longer side
+              }
+              if(targetLonger>0){
+                const longer=Math.max(pd.w,pd.h);
+                const scale=targetLonger/longer;
+                const mp=(pd.w*scale*pd.h*scale)/1000000;
+                if(mp>0) set(WFP.poseScale,"megapixels",Math.max(0.05,mp));
+              }
+            }
+          }
+
+          // Seed + advanced control distributed across the split sampler.
+          const seedP=S.randomizeSeed?Math.floor(Math.random()*999999999999):S.seed;
+          if(S.randomizeSeed){S.seed=seedP;seedInp.setVal(seedP);_advSeedInp.setVal(seedP);_advSeedRefresh();persist();}
+          set(WFP.noise,"noise_seed",seedP);
+          const _poseSteps=S.advancedUI?(S.steps||4):4;
+          const _poseCfg=S.advancedUI?(S.cfg!==undefined?S.cfg:1):1;
+          set(WFP.sched,"steps",_poseSteps);
+          set(WFP.guider,"cfg",_poseCfg);
+          if(S.advancedUI) set(WFP.sampler,"sampler_name",S.sampler||"er_sde");
+
         } else if(isI2IMode){
           // ── I2I workflow patching ──────────────────────────────────────────
           if(extModel){ delete prompt["FK:165"]; }
@@ -8411,7 +8778,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         editPanel.style.display=activePill==="edit"?"flex":"none";
         inpaintPanel.style.display=activePill==="inpaint"?"flex":"none";
         faceswapPanel.style.display=activePill==="faceswap"?"flex":"none";
-        resSect.style.display=(activePill==="inpaint"||activePill==="faceswap"||activePill==="i2i")?"none":"flex";
+        posePanel.style.display=activePill==="pose"?"flex":"none";
+        if(activePill==="pose") _poseApplyBadges();
+        resSect.style.display=(activePill==="inpaint"||activePill==="faceswap"||activePill==="i2i"||activePill==="pose")?"none":"flex";
         updateSizeControls();
       }
 
@@ -8477,6 +8846,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _mkGalCtxSec("Faceswap"),
         _mkGalCtxItem("Target","◎",()=>{ if(_galCtxImg)_loadIntoFsSlot(_galCtxImg,"target"); }),
         _mkGalCtxItem("Source","◈",()=>{ if(_galCtxImg)_loadIntoFsSlot(_galCtxImg,"source"); }),
+        _mkGalCtxDiv(),
+        _mkGalCtxSec("Pose"),
+        _mkGalCtxItem("Pose","◇",()=>{ if(_galCtxImg)_loadIntoPoseSlot(_galCtxImg,"pose"); }),
+        _mkGalCtxItem("Reference","◈",()=>{ if(_galCtxImg)_loadIntoPoseSlot(_galCtxImg,"ref"); }),
       );
       document.body.appendChild(_galCtxMenu);
       document.addEventListener("click",()=>{ _galCtxMenu.style.display="none"; });
@@ -8743,8 +9116,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       const _lbUseDrop=mk("div",{
         position:"absolute",bottom:"calc(100% + 5px)",left:"0",
         background:C.bg1,border:`1px solid ${C.borderH}`,borderRadius:"8px",
-        minWidth:"170px",overflow:"hidden",display:"none",zIndex:"200",
-        boxShadow:"0 4px 20px rgba(0,0,0,.7)",flexDirection:"column",
+        minWidth:"170px",overflowY:"auto",overflowX:"hidden",display:"none",zIndex:"200",
+        maxHeight:"min(360px, 70vh)",boxShadow:"0 4px 20px rgba(0,0,0,.7)",flexDirection:"column",
+        scrollbarWidth:"thin",scrollbarColor:`${C.border} transparent`,
       });
 
       // Section header inside dropdown
@@ -8791,6 +9165,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _mkDropSection("Faceswap"),
         _mkDropItem("Target","◎",()=>{ const v=_lbActiveImg;if(v)_loadIntoFsSlot(v,"target"); }),
         _mkDropItem("Source","◈",()=>{ const v=_lbActiveImg;if(v)_loadIntoFsSlot(v,"source"); }),
+        _mkDropDivider(),
+        _mkDropSection("Pose"),
+        _mkDropItem("Pose","◇",()=>{ const v=_lbActiveImg;if(v)_loadIntoPoseSlot(v,"pose"); }),
+        _mkDropItem("Reference","◈",()=>{ const v=_lbActiveImg;if(v)_loadIntoPoseSlot(v,"ref"); }),
       );
 
       let _lbDropOpen=false;
@@ -9249,6 +9627,21 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         closeOverlayFade(galleryOverlay);
       };
 
+      const _loadIntoPoseSlot=async(v,which)=>{
+        if(activePill!=="pose") setPill("pose");
+        let inputName;
+        try{ inputName=await _uploadOutputToInput(v); }
+        catch(err){ console.warn("[FluxKlein] load-into-pose:",err); inputName=v.filename; }
+        if(which==="ref"){
+          S.poseRef=inputName; _poseRefSlot._restorePreview(inputName);
+        } else {
+          S.poseImage=inputName; _poseImgSlot._restorePreview(inputName);
+        }
+        persist();
+        lightbox.style.display="none";_lbActiveImg=null;
+        closeOverlayFade(galleryOverlay);
+      };
+
       // mkApplyIcon for Load button (same as LTX node)
       const _mkApplyIcon=(size)=>{
         size=size||"13px";
@@ -9630,6 +10023,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           targetSlot=_paintSlot;
         } else if(activePill==="faceswap"){
           targetSlot=!_fsTargetSlot.hasFile()?_fsTargetSlot:_fsSourceSlot;
+        } else if(activePill==="pose"){
+          targetSlot=!_poseImgSlot.hasFile()?_poseImgSlot:_poseRefSlot;
         }
         if(targetSlot) targetSlot.loadFile(file);
       },{capture:true});
@@ -9696,6 +10091,15 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
             if(fsMatch&&fsMatch!=="none"){fsLoraF.dd.set(fsMatch);S.fsLora=fsMatch;}
             else{fsLoraF.dd.set("none");S.fsLora="";}
           } else{fsLoraF.dd.set("none");S.fsLora="";}
+          // Pose LoRA dropdown — same basename matching (handles subfolders)
+          const _matchLora=(want)=>{
+            if(!loraList.length) return "";
+            const nd=(s)=>(s||"").replace(/\\/g,"/").toLowerCase();
+            return loraOpts.find(o=>nd(o)===nd(want))||
+              loraOpts.find(o=>nd(o).split("/").pop()===nd(want).split("/").pop())||"";
+          };
+          poseLoraF.dd.updateItems(loraOpts);
+          { const m=_matchLora(S.poseLora||""); if(m&&m!=="none"){poseLoraF.dd.set(m);S.poseLora=m;} else{poseLoraF.dd.set("none");S.poseLora="";} }
           persist();
         })
         .catch(e=>console.warn("[FluxKlein] models:",e));
@@ -9750,7 +10154,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       if(!window.__fluxklein_nodes) window.__fluxklein_nodes={};
       window.__fluxklein_nodes[this.id]={
         root,S,
-        fns:{showFinal,showPreview,resetBtn,setStage,showError,clearError,getPromptId:()=>_activePromptId},
+        fns:{showFinal,showPreview,resetBtn,setStage,showError,clearError,poseSkeleton,getPromptId:()=>_activePromptId},
       };
       _activeS=S;
       _activeShowFinal=showFinal;
@@ -9758,6 +10162,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       _activeResetBtn=resetBtn;
       _activeSetStage=setStage;
       _activeShowError=showError;
+      _activePoseSkeleton=poseSkeleton;
       _activePromptIdRef=()=>_activePromptId;
     };
   },

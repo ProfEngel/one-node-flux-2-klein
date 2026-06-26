@@ -57,10 +57,13 @@ You need one additional custom node for inpaint and outpaint modes:
 git clone https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch.git
 ```
 
-For POSE mode you also need [comfyui_controlnet_aux](https://github.com/Fannovel16/comfyui_controlnet_aux) by Fannovel16, which provides the DWPose preprocessor. On the Windows portable build, run these two commands from your `ComfyUI_windows_portable` folder:
+For POSE mode you also need [comfyui_controlnet_aux](https://github.com/Fannovel16/comfyui_controlnet_aux) by Fannovel16, which provides the DWPose preprocessor. On the Windows portable build, run these two commands from your `ComfyUI_windows_portable` folder, one after the other:
 
 ```
 git clone https://github.com/Fannovel16/comfyui_controlnet_aux ComfyUI/custom_nodes/comfyui_controlnet_aux
+```
+
+```
 python_embeded\python.exe -s -m pip install -r ComfyUI/custom_nodes/comfyui_controlnet_aux/requirements.txt
 ```
 

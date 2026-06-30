@@ -521,6 +521,10 @@ app.registerExtension({
         _activePromptIdRef=cached.fns.getPromptId;
         this.addDOMWidget("fk_ui","div",cached.root,{
           getValue(){return null;},setValue(){},serialize:false,
+          // canvasOnly: keep this huge UI widget on the graph canvas ONLY. Without it the
+          // new ComfyUI "Parameters" side panel tries to render the same DOM element too,
+          // which steals it from the graph and collapses the whole right side of the UI.
+          canvasOnly:true,
           computeSize(){const slotH=(LiteGraph.NODE_SLOT_HEIGHT||20);const n=(self.inputs||[]).length;return[NODE_W,NODE_H+n*slotH];},
         });
         this.setSize([NODE_W,NODE_H]);
@@ -10125,6 +10129,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       const _slotHInit=(self.inputs||[]).length*(LiteGraph.NODE_SLOT_HEIGHT||20);
       this.addDOMWidget("fk_ui","div",root,{
         getValue(){return null;},setValue(){},serialize:false,
+        // canvasOnly: keep this huge UI widget on the graph canvas ONLY. Without it the
+        // new ComfyUI "Parameters" side panel tries to render the same DOM element too,
+        // which steals it from the graph and collapses the whole right side of the UI.
+        canvasOnly:true,
         computeSize(){const slotH=(LiteGraph.NODE_SLOT_HEIGHT||20);const n=(self.inputs||[]).length;return[NODE_W,NODE_H+n*slotH];},
       });
       this.setSize([NODE_W,NODE_H+_slotHInit]);

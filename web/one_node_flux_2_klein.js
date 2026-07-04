@@ -426,9 +426,112 @@ function saveState(s){
 // ── Active refs for event handlers ────────────────────────────────────────────
 let _activeS=null, _activeShowFinal=null, _activeResetBtn=null, _activeShowError=null, _activePromptIdRef=null, _activeShowPreview=null;
 let _activePoseSkeleton=null; // POSE: called with the DWPose skeleton image URL (for before/after)
+let _activeShowFinalBatch=null; // T2I batch: called with an array of {filename, subfolder}
+let _activeShowTemp=null; // auto-save off: called with array of temp {filename, subfolder, type}
+let _activeSaveNode=null; // auto-save off: id of the current mode's save node (now a PreviewImage)
+let _activeAutoSend=null; // ()=>{} run after a result is shown, to push the image downstream
+let _activeBatchN=1; // batch size SNAPSHOTTED at Generate-click time — the completion handler
+                     // must use this, not the live S.batchCount, so changing the ×N dropdown
+                     // mid-run can't mis-route the result set (drop/mis-slice fresh images).
+
+// Registry of all live FluxKlein nodes, keyed by graph id (kept for cleanup on remove).
+const _fkNodes = {};
+
+// True when ComfyUI's "Nodes 2.0" (Vue node rendering) is enabled. We must NOT set the DOM
+// widget canvasOnly in that mode: Vue renders the node body itself and skips canvasOnly widgets,
+// so the whole UI would render blank. In classic (litegraph) mode canvasOnly is required to stop
+// the Parameters side-panel from stealing the widget (the collapsing-right-panel bug). So the
+// flag is applied conditionally per render mode.
+function _isVueNodes(){
+  try{
+    const v=app?.ui?.settings?.getSettingValue?.("Comfy.VueNodes.Enabled");
+    return v===true||v==="true";
+  }catch(e){ return false; }
+}
+
+// ── One Node family bus ───────────────────────────────────────────────────────
+// A tiny shared registry (on window so every One Node pack — Gemma, Flux, LTX… —
+// shares it) that lets connected One Nodes chain generations directly, WITHOUT
+// touching ComfyUI's queue. Each node registers { triggerGenerate, kind }. When a node
+// finishes and its "send" toggle is on, it calls _oneNodeChainForward(self.id), which
+// finds the One Nodes wired to its output and kicks off their generation. They read
+// their own upstream input and generate, then forward again — forming a chain.
+// Loop-safe: a node only generates when an UPSTREAM node pokes it (never itself), and
+// the re-entrancy guard below stops a poke mid-generation.
+if(!window.__oneNodeFamily) window.__oneNodeFamily={};
+const _oneNodeFamily=window.__oneNodeFamily;
+function _oneNodeRegister(id,api){ _oneNodeFamily[String(id)]=api; }
+// Identity-safe unregister: only drop the entry if it's STILL the same api object we
+// registered. On a workflow switch ComfyUI destroys old node instances AFTER creating the
+// new ones; if the new instance reused the same id, a blind delete here would wipe the live
+// new registration and the chain poke would hit nothing (Flux silently skipped). Passing the
+// api ref makes onRemoved a no-op when a newer instance already took over that id.
+function _oneNodeUnregister(id,api){
+  const k=String(id);
+  if(api!=null && _oneNodeFamily[k]!==api) return; // a newer instance owns this id now — keep it
+  delete _oneNodeFamily[k];
+}
+// Shared "a throwaway graph run is in flight" flag across ALL One Node packs. When any
+// One Node queues a graph run to push its output to plain downstream nodes, that run
+// re-executes the WHOLE graph — including other One Nodes (e.g. an upstream Gemma). They
+// must stay quiet (no re-show, no sound, no re-chaining) during it. A single boolean:
+// set when the run is queued, cleared by the FIRST execution_success that follows (the
+// graph run produces exactly one). A safety timeout clears it if no success arrives.
+function _oneNodeThrowawayBegin(){
+  window.__oneNodeThrowaway=true;
+  clearTimeout(window.__oneNodeThrowawayT);
+  window.__oneNodeThrowawayT=setTimeout(()=>{ window.__oneNodeThrowaway=false; },10000);
+}
+// Clear AFTER the current event dispatch finishes (setTimeout 0), so that EVERY
+// execution_success listener (this pack and others) still sees active===true during the
+// same throwaway run — otherwise whichever listener ran first would clear it and the
+// rest would mistake the throwaway run for a real one.
+function _oneNodeThrowawayEnd(){
+  clearTimeout(window.__oneNodeThrowawayT);
+  setTimeout(()=>{ window.__oneNodeThrowaway=false; },0);
+}
+function _oneNodeThrowawayActive(){ return !!window.__oneNodeThrowaway; }
+// Hard reset at the start of a real user generation so a stuck flag never silences it.
+function _oneNodeThrowawayForceClear(){ clearTimeout(window.__oneNodeThrowawayT); window.__oneNodeThrowaway=false; }
+// Given a source node id, poke every One Node connected to its output(s) to generate.
+// Pokes One Node targets wired to srcId's output to generate, and reports whether ANY
+// non-family (plain ComfyUI) node is also wired downstream. The caller uses that to
+// decide whether a graph run is needed: family targets generate via the poke (no graph
+// run), while plain targets (Preview, upscaler…) still need the graph run to receive
+// our output. Returns { hadFamily, hadPlain }.
+function _oneNodeChainForward(srcId){
+  const res={hadFamily:false,hadPlain:false};
+  try{
+    const src=app.graph.getNodeById(srcId);
+    if(!src||!src.outputs) return res;
+    const targetIds=new Set();
+    src.outputs.forEach(out=>{
+      (out&&out.links||[]).forEach(linkId=>{
+        const link=app.graph.links[linkId];
+        if(link) targetIds.add(String(link.target_id));
+      });
+    });
+    targetIds.forEach(tid=>{
+      const entry=_oneNodeFamily[tid];
+      if(entry&&typeof entry.triggerGenerate==="function"){
+        res.hadFamily=true;
+        try{ entry.triggerGenerate(); }catch(e){ console.warn("[OneNode] chain poke:",e); }
+      } else {
+        res.hadPlain=true;
+      }
+    });
+  }catch(e){ console.warn("[OneNode] chain forward:",e); }
+  return res;
+}
 
 // ── API events ────────────────────────────────────────────────────────────────
+// Guard so the WS listeners are registered exactly once even if this module is
+// evaluated more than once (hot reload / re-import) — double registration meant every
+// event fired twice (e.g. the done sound played 2×).
 (()=>{
+  if(window.__fluxklein_listeners) return;
+  window.__fluxklein_listeners=true;
+
   api.addEventListener("progress",(evt)=>{
     const {node,value,max}=evt.detail||{};
     if(!_activeS?.generating||!node) return;
@@ -445,6 +548,7 @@ let _activePoseSkeleton=null; // POSE: called with the DWPose skeleton image URL
   // POSE: FKP:posepreview (PreviewImage on the DWPose output) emits the skeleton
   // image. Stash its URL so the final result can offer a before(skeleton)/after.
   api.addEventListener("executed",(evt)=>{
+    if(_oneNodeThrowawayActive()) return; // ignore events from a One Node downstream-push graph run
     if(!_activeS?.generating) return;
     const d=evt.detail||{};
     if(d.node!=="FKP:posepreview") return;
@@ -455,17 +559,69 @@ let _activePoseSkeleton=null; // POSE: called with the DWPose skeleton image URL
     _activePoseSkeleton?.(url);
   });
 
-  api.addEventListener("execution_success",async()=>{
+  // Auto-save off: the current mode's save node is a PreviewImage (temp). Grab its
+  // temp images here (a gallery scan won't see them — they're not in output).
+  api.addEventListener("executed",(evt)=>{
+    if(_oneNodeThrowawayActive()) return; // ignore events from a One Node downstream-push graph run
     if(!_activeS?.generating) return;
+    const d=evt.detail||{};
+    // Only react to OUR OWN run — executed is global and a chained downstream graph fires it too.
+    const ourId=_activePromptIdRef?.();
+    if(d.prompt_id && ourId && d.prompt_id!==ourId) return;
+    // Only the temp/PreviewImage path (auto-save off) is handled here. When auto-save
+    // is on, the save node is a real SaveImage and also fires "executed" — but those
+    // results belong to the gallery (handled in execution_success), so ignore. We also
+    // match the exact save node id so we don't catch other PreviewImage nodes in a
+    // workflow (e.g. the POSE skeleton preview).
+    if(_activeS?.autoSave!==false) return;
+    if(!_activeSaveNode || d.node!==_activeSaveNode) return;
+    const imgs=d.output?.images;
+    if(!imgs||!imgs.length) return;
+    _activeShowTemp?.(imgs.map(im=>({filename:im.filename,subfolder:im.subfolder||"",type:im.type||"temp"})));
+  });
+
+  api.addEventListener("execution_success",async(evt)=>{
+    // A One Node downstream-push graph run finished — clear it and stay quiet.
+    if(_oneNodeThrowawayActive()){ _oneNodeThrowawayEnd(); return; }
+    if(!_activeS?.generating){
+      // Not our generation (e.g. the user pressing Run on the graph), OR the auto-save-off
+      // temp path already finished (it sets generating=false in showTemp and triggers
+      // auto-send itself). Either way, nothing to pull from the gallery here.
+      return;
+    }
+    // execution_success is GLOBAL — it fires for every prompt in the queue, including a
+    // chained downstream graph (e.g. a z-image edit reading our output). Only react to OUR
+    // OWN run. Without this, a foreign success while we're still generating would pull
+    // all[0] (the newest gallery image = a STALE image) and show + send that everywhere.
+    const successId=evt?.detail?.prompt_id;
+    const ourId=_activePromptIdRef?.();
+    if(successId && ourId && successId!==ourId) return; // foreign run (chained downstream graph) — ignore
     try{
       const r=await api.fetchApi(`/flux_klein/gallery?offset=0&limit=20&subfolder=one-node-flux-2-klein`);
       const d=await r.json();
       const prev=_activeS?._preRunFiles||new Set();
-      const v=(d.images||d.videos||[]).find(v=>!prev.has(v.key||((v.subfolder?`${v.subfolder}/`:"")+v.filename)))||(d.images||d.videos||[])[0];
+      const all=(d.images||d.videos||[]);
+      const fresh=all.filter(v=>!prev.has(v.key||((v.subfolder?`${v.subfolder}/`:"")+v.filename)));
+      // Use the batch size snapshotted at Generate time, NOT the live dropdown value — the
+      // user may have changed ×N mid-run, which would otherwise drop or mis-slice fresh images.
+      const batchN=Math.max(1,Math.min(4,+_activeBatchN||1));
+      // Batch (>1): hand the whole set of new images to the batch handler.
+      if(batchN>1 && _activeShowFinalBatch && fresh.length){
+        // Gallery returns newest first; reverse so the batch is shown in generation order.
+        const batch=fresh.slice(0,batchN).reverse().map(v=>({filename:v.filename,subfolder:v.subfolder||""}));
+        _activeShowFinalBatch(batch);
+        _activeAutoSend?.();
+        return;
+      }
+      // Only ever use a FRESH image (one that didn't exist before this run). Never fall
+      // back to all[0] — that's the newest gallery image, which on a foreign/empty result
+      // would be a STALE image shown in the preview and pushed downstream (the bug here).
+      const v=fresh[0];
       if(v){
         const cb=Date.now();
         const url=api.apiURL(`/view?filename=${encodeURIComponent(v.filename)}&type=output&subfolder=${encodeURIComponent(v.subfolder||"")}&t=${cb}`);
         _activeShowFinal?.(url,v.filename,v.subfolder||"");
+        _activeAutoSend?.();
       }else{
         _activeResetBtn?.();
       }
@@ -476,6 +632,11 @@ let _activePoseSkeleton=null; // POSE: called with the DWPose skeleton image URL
   });
 
   api.addEventListener("execution_error",evt=>{
+    // A throwaway downstream-push graph run (auto-send) that ERRORS would otherwise never
+    // clear the shared flag — only execution_success does — leaving it stuck true until the
+    // 10s safety timeout, which silences every One Node pack's handlers meanwhile. Clear it
+    // here so a failed push doesn't create a ~10s dead window where generation shows nothing.
+    if(_oneNodeThrowawayActive()){ _oneNodeThrowawayForceClear(); return; }
     const errorPromptId=evt.detail?.prompt_id;
     if(errorPromptId && _activePromptIdRef && errorPromptId!==_activePromptIdRef()) return;
     const msg=fmtErr(evt.detail?.exception_message||evt.detail?.error||evt.detail||"Execution failed.");
@@ -504,50 +665,119 @@ app.registerExtension({
 
     nodeType.prototype.onNodeCreated=function(){
       this.color=C.bg0;this.bgcolor=C.bg0;this.resizable=false;
+      // Reset to a clean slate, then (re)add our single IMAGE output. The Python
+      // RETURN_TYPES already declares it, but we rebuild outputs here so it survives
+      // and is styled consistently. Inputs (prompt + optional ext loaders) are left
+      // intact — they come from Python INPUT_TYPES / the ext-loaders toggle.
       this.outputs=[];
       if(this.widgets)this.widgets=[];
+      this.addOutput("image","IMAGE");
 
       if(!window.__fluxklein_nodes) window.__fluxklein_nodes={};
       const nodeId=this.id;
       const cached=window.__fluxklein_nodes[nodeId];
       if(cached){
+        // Point the cached UI's closures at THIS (current) node instance. On a workflow
+        // switch ComfyUI rebuilds the node but we reuse the cached DOM/closures, which were
+        // bound to the ORIGINAL instance via `self`. All id-dependent closures read
+        // cached.currentNode (see _buildUI), so updating it here keeps prompt-input reading,
+        // output push, and chain forwarding pointed at the live node — not a stale one.
+        cached.currentNode=this;
         _activeS=cached.S;
         _activeShowFinal=cached.fns.showFinal;
+        _activeShowFinalBatch=cached.fns.showFinalBatch;
+        _activeShowTemp=cached.fns.showTemp;
         _activeShowPreview=cached.fns.showPreview;
         _activeResetBtn=cached.fns.resetBtn;
         _activeShowError=cached.fns.showError;
         _activeSetStage=cached.fns.setStage;
         _activePoseSkeleton=cached.fns.poseSkeleton;
+        _activeAutoSend=cached.fns.autoSend;
         _activePromptIdRef=cached.fns.getPromptId;
+        const _cnode=this;
         this.addDOMWidget("fk_ui","div",cached.root,{
           getValue(){return null;},setValue(){},serialize:false,
-          // canvasOnly: keep this huge UI widget on the graph canvas ONLY. Without it the
-          // new ComfyUI "Parameters" side panel tries to render the same DOM element too,
-          // which steals it from the graph and collapses the whole right side of the UI.
-          canvasOnly:true,
-          computeSize(){const slotH=(LiteGraph.NODE_SLOT_HEIGHT||20);const n=(self.inputs||[]).length;return[NODE_W,NODE_H+n*slotH];},
+          // canvasOnly (classic mode only): keeps this huge UI widget on the graph canvas so the
+          // Parameters side-panel can't steal it (collapsing-right-panel bug). In Nodes 2.0 the
+          // Vue renderer skips canvasOnly widgets → blank node, so we must NOT set it there.
+          canvasOnly:!_isVueNodes(),
+          computeSize(){
+            const slotH=(LiteGraph.NODE_SLOT_HEIGHT||20);
+            const rows=Math.max((_cnode.inputs||[]).length,(_cnode.outputs||[]).length);
+            return [NODE_W,NODE_H+rows*slotH];
+          },
         });
-        this.setSize([NODE_W,NODE_H]);
+        {
+          const _sh=(LiteGraph.NODE_SLOT_HEIGHT||20);
+          const _rows=Math.max((this.inputs||[]).length,(this.outputs||[]).length);
+          this.setSize([NODE_W,NODE_H+_rows*_sh]);
+        }
         requestAnimationFrame(()=>{
           let el=cached.root;
           for(let i=0;i<6;i++){ el=el?.parentElement; if(!el)break; el.querySelectorAll("[class*='bg-node-component-surface']").forEach(b=>b.style.display="none"); }
         });
+        // CRITICAL: re-register into the One Node family bus here too. This cached branch
+        // runs on a workflow switch (the node instance is rebuilt but its UI is reused from
+        // cache). _buildUI — which normally does the family registration — is skipped, so
+        // without this the node would NOT be in the family registry and an upstream Gemma's
+        // chain poke would treat it as a plain node (Flux silently skipped, stale image sent).
+        // NOTE: this.id is still the placeholder -1 right now; LiteGraph assigns the real id a
+        // moment later. So we register, then RE-register on the next frame under the real id
+        // (and drop the stale -1 key) — exactly like the fresh _buildUI branch does.
+        if(typeof cached.fns.triggerGenerate==="function"){
+          const _cnode=this;
+          const _cachedApi={ kind:"flux", triggerGenerate:cached.fns.triggerGenerate };
+          this._fkFamilyApiRef=()=>_cachedApi;
+          let _cachedRegId=null;
+          const _regCached=()=>{
+            const id=_cnode.id;
+            if(_cachedRegId!=null && _cachedRegId!==id) _oneNodeUnregister(_cachedRegId,_cachedApi); // drop stale -1 key (only if still ours)
+            _cachedRegId=id;
+            _oneNodeRegister(id,_cachedApi);
+          };
+          _regCached();
+          requestAnimationFrame(_regCached);
+        }
         return;
       }
       this._buildUI();
     };
 
     nodeType.prototype.onResize=function(){
+      // Keep the node locked to NODE_H plus the height LiteGraph needs for the slot
+      // rows (whichever side — inputs or outputs — has more). The UI is fixed height.
       const slotH=(LiteGraph.NODE_SLOT_HEIGHT||20);
-      const n=(this.inputs||[]).length;
-      this.size=[NODE_W,NODE_H+n*slotH];
+      const rows=Math.max((this.inputs||[]).length,(this.outputs||[]).length);
+      this.size=[NODE_W,NODE_H+rows*slotH];
     };
     nodeType.prototype.onDrawConnections=function(){};
     nodeType.prototype.getSlotMenuOptions=function(){return[];};
+    nodeType.prototype.onRemoved=function(){
+      // Clean up registries so nothing calls into a deleted node. Pass our own api ref so a
+      // newer instance that reused this id (workflow switch) is NOT wiped — see _oneNodeUnregister.
+      try{ delete _fkNodes[this.id]; }catch(e){}
+      try{ _oneNodeUnregister(this.id, this._fkFamilyApiRef?.()); }catch(e){}
+      // Only drop the UI cache if THIS instance still owns it. On a workflow switch the new
+      // instance has already claimed the cache (cached.currentNode=newNode) before this old
+      // instance's onRemoved fires; deleting it blindly would wipe the live UI cache and the
+      // reused node would lose its prompt-input wiring / output push (the bug seen here).
+      try{
+        const c=window.__fluxklein_nodes&&window.__fluxklein_nodes[this.id];
+        if(c && (c.currentNode===this || c.currentNode==null)) delete window.__fluxklein_nodes[this.id];
+      }catch(e){}
+    };
 
 
     nodeType.prototype._buildUI=function(){
       const self=this;
+      // The live node id. On a workflow switch the cached UI/closures are reused but bound to
+      // the original `self`; the cache's currentNode is repointed to the new instance, so read
+      // the id through it. Falls back to self before the cache object exists (during build).
+      let _curCacheKey=self.id;
+      const _liveId=()=>{
+        try{ const c=window.__fluxklein_nodes&&window.__fluxklein_nodes[_curCacheKey]; if(c&&c.currentNode) return c.currentNode.id; }catch(e){}
+        return self.id;
+      };
       const saved=loadState();
 
       if(!self._fk_S){
@@ -588,6 +818,9 @@ app.registerExtension({
           fsLora:       saved.fsLora||"",       // faceswap: LoRA filename
           fsResizeLonger: saved.fsResizeLonger||0, // 0 = disabled, >0 = resize longer side to this px
           bgRemovalModel: saved.bgRemovalModel||"",  // birefnet model for remove bg
+          batchCount:   saved.batchCount||1,    // T2I: how many images to generate per click (1-4)
+          autoSave:     saved.autoSave!==undefined?saved.autoSave:true, // T2I: auto-save results to gallery (default on)
+          autoSend:     saved.autoSend!==undefined?saved.autoSend:true, // send image output downstream automatically (default on)
           // Pose (RefControl): DWPose skeleton from pose image + reference -> result.
           poseImage:    saved.poseImage||null,   // pose: the pose to copy (DWPose skeleton)
           poseRef:      saved.poseRef||null,     // pose: appearance/content reference image
@@ -644,6 +877,7 @@ app.registerExtension({
           advancedUI:S.advancedUI, steps:S.steps, cfg:S.cfg, sampler:S.sampler, scheduler:S.scheduler, denoise:S.denoise,
           image1Name:S.image1Name, image2Name:S.image2Name,
           fsTarget:S.fsTarget, fsSource:S.fsSource, fsLora:S.fsLora, fsResizeLonger:S.fsResizeLonger, bgRemovalModel:S.bgRemovalModel,
+          batchCount:S.batchCount, autoSave:S.autoSave, autoSend:S.autoSend,
           poseImage:S.poseImage, poseRef:S.poseRef, poseLora:S.poseLora,
           poseUseSizeSource:S.poseUseSizeSource, poseResizeLonger:S.poseResizeLonger,
           prompt:S.prompt, promptT2i:S.promptT2i, promptEdit:S.promptEdit,
@@ -1017,8 +1251,22 @@ app.registerExtension({
       const _extInputNames=["model","clip","vae"];
       const _extInputColors=["#b39ddb","#80cbc4","#ef9a9a"];
 
+      // Single source of truth for the node's size. The UI (DOM widget) is always
+      // NODE_H tall; LiteGraph stacks the input/output slots above it, reserving
+      // slotH per row for whichever side has more rows. We add that reserved height so
+      // the widget never overflows the node's bottom edge when slots are toggled.
+      const _fkResizeToFit=(node)=>{
+        node=node||app.graph.getNodeById(_liveId())||self;
+        if(!node) return;
+        const nIn=(node.inputs||[]).length;
+        const nOut=(node.outputs||[]).length;
+        const rows=Math.max(nIn,nOut);
+        node.size=[NODE_W, NODE_H+rows*_slotH];
+        node.setDirtyCanvas(true,true);
+      };
+
       const _applyExtLoaders=(enabled)=>{
-        const node=app.graph.getNodeById(self.id)||self;
+        const node=app.graph.getNodeById(_liveId())||self;
         if(!node) return;
         if(enabled){
           // Add any missing ext slots individually — some may already exist if a
@@ -1032,9 +1280,7 @@ app.registerExtension({
               if(slot) slot.color_on=_extInputColors[i];
             }
           });
-          const n=(node.inputs||[]).filter(i=>_extInputNames.includes(i.name)).length;
-          node.size=[NODE_W, NODE_H+n*_slotH];
-          node.setDirtyCanvas(true,true);
+          _fkResizeToFit(node);
         } else {
           // Turning the toggle off removes the empty slots, but KEEPS any slot that
           // still has a wire connected (e.g. a GGUF loader). That way you can flip the
@@ -1046,9 +1292,7 @@ app.registerExtension({
               if(_extInputNames.includes(inp.name)&&inp.link==null) node.removeInput(i);
             }
           }
-          const remaining=(node.inputs||[]).filter(i=>_extInputNames.includes(i.name)).length;
-          node.size=[NODE_W, NODE_H+remaining*_slotH];
-          node.setDirtyCanvas(true,true);
+          _fkResizeToFit(node);
         }
       };
 
@@ -1057,6 +1301,9 @@ app.registerExtension({
         _applyExtLoaders(v);
         _refreshExtInputUI();
       });
+
+      // (Send-output-downstream toggle lives in the main UI preview area, bottom-left,
+      // next to the auto-save toggle — not in Settings.)
 
       // ── Downscale reference images (EDIT + I2I) ──────────────────────────────
       const _dsRow=mk("div",{display:"flex",flexDirection:"column",gap:"5px",padding:"9px 0",borderBottom:`1px solid ${C.border}`});
@@ -1211,7 +1458,7 @@ app.registerExtension({
       const gatedTitle=mk("div",{fontSize:"10px",fontWeight:"700",color:"#ffb347",letterSpacing:".03em"});
       tx(gatedTitle,"9B models require HuggingFace access");
       const gatedBody=mk("div",{fontSize:"9px",color:"#ccc",lineHeight:"1.6"});
-      tx(gatedBody,"These models are gated under the FLUX Non-Commercial License. You must log in to HuggingFace, visit the model page, and click \"Agree\" to accept the license terms before the download links will work.\nNon-commercial use only.");
+      tx(gatedBody,"These models are gated under the FLUX Non-Commercial License. You must log in to HuggingFace, visit the model page, and click \"Agree\" to accept the license terms before the download links will work.");
       gatedBody.style.whiteSpace="pre-line";
       const gatedLink=document.createElement("a");
       gatedLink.href="https://huggingface.co/black-forest-labs/FLUX.2-klein-9B";
@@ -1230,8 +1477,6 @@ app.registerExtension({
         _mkModelRow("Diffusion Model","models/diffusion_models/",[
           {name:"flux-2 klein 9b distilled",url:"https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-9b.safetensors"},
           {name:"flux-2 klein 9b fp8 distilled",url:"https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors"},
-          {name:"flux-2 klein 9b kv",url:"https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv/resolve/main/flux-2-klein-9b-kv.safetensors"},
-          {name:"flux-2 klein 9b kv fp8",url:"https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv-fp8/resolve/main/flux-2-klein-9b-kv-fp8.safetensors"},
           {name:"flux-2 klein 4b distilled",url:"https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/resolve/main/flux-2-klein-4b.safetensors"},
           {name:"flux-2 klein 4b fp8 distilled",url:"https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors"},
         ]),
@@ -1249,6 +1494,9 @@ app.registerExtension({
         _mkModelRow("Faceswap LoRA","models/loras/",[
           {name:"bfs head swap v1 (9b)",url:"https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/resolve/main/bfs_head_v1_flux-klein_9b_step3500_rank128.safetensors"},
           {name:"bfs head swap v1 (4b)",url:"https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/resolve/main/bfs_head_v1_flux-klein_4b.safetensors"},
+        ]),
+        _mkModelRow("Pose LoRA","models/loras/",[
+          {name:"refcontrol v2 poses (9b)",url:"https://huggingface.co/thedeoxen/refcontrol-FLUX.2-klein-9B-reference-pose-lora/resolve/main/refcontrol_v2_poses.safetensors?download=true"},
         ]),
         _mkModelRow("BG Removal","models/background_removal/",[
           {name:"birefnet",url:"https://huggingface.co/Comfy-Org/BiRefNet/resolve/main/background_removal/birefnet.safetensors"},
@@ -1323,7 +1571,7 @@ app.registerExtension({
       settingsBtn.onmouseenter=()=>{settingsBtn.style.borderColor=C.text;settingsBtn.style.color=C.text;settGear.style.transform="rotate(30deg)";};
       settingsBtn.onmouseleave=()=>{settingsBtn.style.borderColor=C.borderH;settingsBtn.style.color=C.muted;settGear.style.transform="";};
       const _refreshExtInputUI=()=>{
-        const n=app.graph.getNodeById(self.id);
+        const n=app.graph.getNodeById(_liveId());
         // Only dim a dropdown when external inputs are ENABLED and that slot is wired.
         // With the toggle off, the dropdowns are always live (their model is used),
         // even if a GGUF wire is still physically connected.
@@ -1553,8 +1801,35 @@ app.registerExtension({
         ov.addEventListener("keydown",e=>{if(e.key==="Escape")_nfClose();});
         ov.setAttribute("tabindex","-1");
         ov._close=_nfClose;
-        ov.append(_nfTopBar,_nfMediaWrap);
+
+        // ── Batch navigation inside fullscreen (mirrors the in-UI batch nav) ──
+        // ov._navHook is wired up later (once _batchImgs/_batchShow exist) to step the
+        // batch and re-render this overlay. Shown only when a batch is open.
+        const _nfNav=mk("div",{
+          position:"absolute",bottom:"16px",left:"50%",transform:"translateX(-50%)",
+          zIndex:"6",display:"none",alignItems:"center",gap:"10px",
+          background:"rgba(20,20,20,.85)",border:"1px solid rgba(255,255,255,.2)",
+          borderRadius:"10px",padding:"6px 10px",backdropFilter:"blur(4px)",
+          boxShadow:"0 2px 10px rgba(0,0,0,.6)",
+        });
+        const _nfNavBtn=(svg)=>{ const b=mk("button",{background:"transparent",border:"none",
+          color:"rgba(255,255,255,.85)",cursor:"pointer",padding:"3px 6px",outline:"none",
+          display:"flex",alignItems:"center",lineHeight:"0",borderRadius:"5px"});
+          b.innerHTML=svg; b.onmouseenter=()=>b.style.color=LIME; b.onmouseleave=()=>b.style.color="rgba(255,255,255,.85)"; return b; };
+        const _nfPrev=_nfNavBtn(`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>`);
+        const _nfNext=_nfNavBtn(`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>`);
+        const _nfCounter=mk("span",{fontSize:"11px",fontWeight:"700",color:"#fff",minWidth:"36px",textAlign:"center",letterSpacing:".03em"});
+        _nfPrev.onclick=(e)=>{ e.stopPropagation(); ov._navHook&&ov._navHook(-1); };
+        _nfNext.onclick=(e)=>{ e.stopPropagation(); ov._navHook&&ov._navHook(1); };
+        _nfNav.append(_nfPrev,_nfCounter,_nfNext);
+        ov._nfNav=_nfNav; ov._nfCounter=_nfCounter;
+
+        ov.append(_nfTopBar,_nfMediaWrap,_nfNav);
         ov._open=(type,src,name,opts)=>{
+          // Clean up any previous comparer drag listeners / Use-as button before
+          // re-rendering — _open is called again on each batch step.
+          if(ov._cleanupCmp){ov._cleanupCmp();ov._cleanupCmp=null;}
+          if(ov._fsUseBtn){ov._fsUseBtn.remove();ov._fsUseBtn=null;}
           _nfMediaWrap.innerHTML="";
           _nfMediaWrap.style.padding="0"; // image and comparer both fill the full area
           tx(_nfName,name||"");
@@ -1571,6 +1846,7 @@ app.registerExtension({
               borderRadius:"8px",boxShadow:"0 4px 24px rgba(0,0,0,.5)",display:"block"});
             img.src=src;
             _nfMediaWrap.appendChild(img);
+            ov._curImg=img; ov._curCmpGen=null; ov._curCmpBase=null;
           } else if(type==="comparer"){
             // Full-screen before/after comparer with "Use as input" in top-right
             const {genSrc,baseSrc,onUse}=opts||{};
@@ -1612,6 +1888,7 @@ app.registerExtension({
             _nfMediaWrap.style.padding="0"; // comparer fills full area
             _nfMediaWrap.appendChild(cWrap);
             cGenImg.onload=()=>{ _fsSetPct(100); };
+            ov._curImg=null; ov._curCmpGen=cGenImg; ov._curCmpBase=cBase; ov._curCmpSetPct=_fsSetPct;
             // "Use as input" button — top-right corner of the overlay
             if(onUse){
               const useBtn=mk("button",{
@@ -1632,7 +1909,38 @@ app.registerExtension({
               ov._fsUseBtn=useBtn;
             }
           }
+          // Show batch nav when a multi-image batch is open; ov._navInfo is set by the
+          // hook wiring (count + current index) so we don't reach into batch state here.
+          const ni=ov._navInfo;
+          if(ni&&ni.count>1){
+            _nfNav.style.display="flex";
+            tx(_nfCounter,`${ni.idx+1} / ${ni.count}`);
+          } else {
+            _nfNav.style.display="none";
+          }
           ov.style.display="flex";ov.focus();
+        };
+        // Update the batch counter / nav visibility from ov._navInfo.
+        const _nfRefreshNav=()=>{
+          const ni=ov._navInfo;
+          if(ni&&ni.count>1){ _nfNav.style.display="flex"; tx(_nfCounter,`${ni.idx+1} / ${ni.count}`); }
+          else { _nfNav.style.display="none"; }
+        };
+        // Lightweight media swap for batch stepping: if the overlay is already showing
+        // the same kind of media, just change the image src(s) in place instead of
+        // tearing down and rebuilding the DOM (which caused a brief flash of the old
+        // image at the wrong size). Returns false if a full _open is needed instead.
+        ov._updateMedia=(type,src,baseSrc)=>{
+          if(type==="image"&&ov._curImg){
+            ov._curImg.src=src; _nfRefreshNav(); return true;
+          }
+          if(type==="comparer"&&ov._curCmpGen&&ov._curCmpBase){
+            if(baseSrc!==undefined&&baseSrc!==null) ov._curCmpBase.src=baseSrc;
+            ov._curCmpGen.src=src;
+            ov._curCmpSetPct&&ov._curCmpSetPct(100);
+            _nfRefreshNav(); return true;
+          }
+          return false;
         };
         root.appendChild(ov);
         _nodeFsOv=ov;
@@ -1977,6 +2285,7 @@ app.registerExtension({
 
       // Uploaded mask filename — declared here so _paintSlot callback can reset it on new image load
       let _maskName=null;
+      let _paintRefName=S.inpaintRefName||null; // optional reference image for reference-guided inpainting
       let _opMaskName=null;  // uploaded outpaint mask (white=new area)
       let _inpaintPromptSet=false;  // true after first inpaint Apply — prevents overwriting user prompt
       let _outpaintPromptSet=false; // true after first outpaint Apply Changes
@@ -2045,6 +2354,7 @@ app.registerExtension({
         _inpaintBtn.style.background=inpaintActive?"rgba(240,255,65,.12)":C.bg2;
         _inpaintBtn.style.borderColor=inpaintActive?LIME:C.borderH;
         _inpaintBtn.querySelector("div").style.color=inpaintActive?LIME:C.text;
+        if(typeof _refreshPaintBatchNote==="function") _refreshPaintBatchNote();
       };
 
       _paintActCol.append(_sketchBtn,_inpaintBtn);
@@ -2058,7 +2368,21 @@ app.registerExtension({
       _paintCustomRow.append(_paintWInp,_paintHInp);
       const _paintUpdateSizeNote=()=>{}; // no-op — no visible note
 
-      inpaintPanel.append(_paintTopRow);
+      // Note shown under the image slot whenever ×N > 1 in PAINT mode — batch only works in
+      // Sketch; inpaint/outpaint build a single-image, mask-bound latent that can't be batched.
+      const _paintBatchNote=mk("div",{
+        display:"none",fontSize:"9px",color:"#e0b050",fontWeight:"600",
+        letterSpacing:".02em",padding:"4px 8px",lineHeight:"1.4",
+        background:"rgba(224,176,80,.08)",border:"1px solid rgba(224,176,80,.28)",
+        borderRadius:"6px",marginTop:"2px",
+      });
+      tx(_paintBatchNote,"Batch is available only in Sketch. Inpaint & Outpaint run one image at a time.");
+      const _refreshPaintBatchNote=()=>{
+        // Show whenever in PAINT mode with ×N > 1 — regardless of sketch/inpaint/outpaint sub-mode.
+        _paintBatchNote.style.display=(activePill==="inpaint"&&(+S.batchCount||1)>1)?"block":"none";
+      };
+
+      inpaintPanel.append(_paintTopRow,_paintBatchNote);
 
       // ── SKETCH OVERLAY (inside root, full node area) ──────────────────────
       const _sketchOv=mk("div",{
@@ -4688,6 +5012,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _opHintBar.style.display=isInp?"none":"block";
         tx(_maskConfirmBtn,isInp?"Apply":"Apply Changes");
         _maskTopBar.append(_maskSpacer,_maskConfirmBtn,_maskCancelBtn);
+        // Reference panel is inpaint-only (outpaint workflow has no reference chain)
+        if(typeof _refPanel!=="undefined"&&_refPanel) _refPanel.style.display=isInp?"flex":"none";
       };
 
       // ── Outpaint controls bar ─────────────────────────────────────────────
@@ -5106,6 +5432,28 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       tx(_inpScaleLbl,"Scale by longer side");
       _inpScaleRow.append(_inpScaleLbl,_inpResLongerInp,_inpResResultLbl);
 
+      // ── Inpaint seam feather — how far the fill blends into the original ──
+      // Drives InpaintCropImproved.mask_blend_pixels (FKI:209). Higher = softer,
+      // less visible seam at the mask edge. Same control users know from outpaint.
+      const _inpFeatherRow=mk("div",{
+        display:"flex",alignItems:"center",gap:"6px",
+        border:`1px solid ${C.border}`,borderRadius:"6px",padding:"5px 10px",background:C.bg1,
+      });
+      const _inpFeatherLbl=mk("span",{fontSize:"9px",fontWeight:"600",color:C.muted,whiteSpace:"nowrap"});
+      tx(_inpFeatherLbl,"Seam feather");
+      // 0 = Auto (node default, 32px). A user value overrides it. Node max is 64.
+      const _inpFeatherSlider=mk("input",{width:"82px",accentColor:LIME,flexShrink:"0"},
+        {type:"range",min:"0",max:"64",step:"4",value:"0"});
+      const _inpFeatherVal=mk("span",{fontSize:"9px",color:LIME,fontWeight:"700",whiteSpace:"nowrap",minWidth:"30px"});
+      const _inpFeatherFmt=()=>{ const v=+S.inpFeather||0; tx(_inpFeatherVal, v>0?`${v}px`:"Auto"); };
+      if(S.inpFeather===undefined) S.inpFeather=0;
+      S.inpFeather=Math.max(0,Math.min(64,+S.inpFeather||0)); // clamp any stale value from earlier builds
+      _inpFeatherSlider.value=String(S.inpFeather);
+      _inpFeatherFmt();
+      _inpFeatherRow.title="How far the generated fill blends into the original at the mask edge. Higher = softer, fewer visible seams. 0 = Auto.";
+      _inpFeatherSlider.oninput=()=>{ S.inpFeather=+_inpFeatherSlider.value||0; _inpFeatherFmt(); persist(); };
+      _inpFeatherRow.append(_inpFeatherLbl,_inpFeatherSlider,_inpFeatherVal);
+
       const _inpCalcDims=()=>{
         const w=_maskCanvasW, h=_maskCanvasH;
         if(_inpUseOrigSize||!w||!h) return {w,h,resized:false};
@@ -5164,7 +5512,37 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         padding:"6px 16px 10px",borderTop:`1px solid rgba(255,255,255,.05)`,
         background:C.bg1,flexShrink:"0",
       });
-      _inpBar.append(_inpDimsLbl,_inpScaleRow);
+      _inpBar.append(_inpDimsLbl,_inpScaleRow,_inpFeatherRow);
+
+      // ── Reference image panel (reference-guided inpainting) ────────────────
+      // Floating card in the top-right of the canvas viewport. Inpaint mode only.
+      // Lets the user provide a second image the model references while filling the mask.
+      const _refPanel=mk("div",{
+        position:"absolute",top:"10px",right:"10px",zIndex:"20",
+        display:"flex",flexDirection:"column",gap:"4px",alignItems:"center",
+        padding:"8px",borderRadius:"10px",
+        background:"rgba(18,18,20,.82)",border:`1px solid ${C.border}`,
+        backdropFilter:"blur(6px)",boxShadow:"0 4px 16px rgba(0,0,0,.4)",
+      });
+      const _refPanelLbl=mk("div",{
+        fontSize:"8px",fontWeight:"700",color:C.muted,
+        textTransform:"uppercase",letterSpacing:".07em",textAlign:"center",
+      });
+      tx(_refPanelLbl,"Reference");
+      const _refPanelHint=mk("div",{
+        fontSize:"7px",color:C.muted,textAlign:"center",opacity:".7",lineHeight:"1.3",
+        maxWidth:"88px",
+      });
+      tx(_refPanelHint,"Optional — guides the fill");
+      const _refSlot=ImgSlot(true,(name)=>{
+        _paintRefName=name||null;
+        S.inpaintRefName=_paintRefName;persist();
+      },null);
+      // Compact the slot for the floating panel
+      try{ _refSlot.el.style.width="80px"; _refSlot.el.style.height="80px"; }catch(e){}
+      _refPanel.append(_refPanelLbl,_refSlot.el,_refPanelHint);
+      _maskViewport.appendChild(_refPanel);
+      if(_paintRefName){ try{ _refSlot._restorePreview(_paintRefName); }catch(e){} }
 
       _maskOv.append(_maskTopBar,_opHintBar,_maskViewport,_opBar,_inpBar,_maskErrBar);
 
@@ -5231,14 +5609,17 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       let _maskPanning=false;
       let _maskPanStartX=0,_maskPanStartY=0,_maskPanStartPX=0,_maskPanStartPY=0;
       let _maskSpaceDown=false;
+      // CAPTURE phase: another keydown listener (ComfyUI core / a plugin) swallows the Space
+      // keydown with stopImmediatePropagation before it reaches a bubbling listener here — so
+      // the space-pan never armed (only the keyup got through). Capturing grabs it first.
       document.addEventListener("keydown",e=>{
         if(_maskOv.style.display==="none") return;
-        if(e.code==="Space"&&e.target.tagName!=="INPUT"){ e.preventDefault(); _maskSpaceDown=true; _maskViewport.style.cursor="grab"; }
-      });
+        if(e.code==="Space"&&e.target.tagName!=="INPUT"){ e.preventDefault();e.stopPropagation(); _maskSpaceDown=true; _maskViewport.style.cursor="grab"; }
+      },{capture:true});
       document.addEventListener("keyup",e=>{
         if(_maskOv.style.display==="none") return;
         if(e.code==="Space"){ _maskSpaceDown=false; if(!_maskPanning) _maskViewport.style.cursor=_maskMode==="inpaint"?"none":"default"; }
-      });
+      },{capture:true});
 
       _maskViewport.addEventListener("wheel",(e)=>{
         e.preventDefault();
@@ -5993,7 +6374,50 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         }
         resetBtn();
       };
-      genRow.append(genBtn,stopBtn);
+      // ── Batch split-button (T2I only): pick how many images per Generate ──
+      const _batchWrap=mk("div",{position:"relative",flexShrink:"0",display:"none"});
+      const _batchBtn=mk("button",{
+        background:LIME,color:"#111",border:"2px solid transparent",borderRadius:"8px",
+        height:"38px",padding:"0 8px 0 7px",marginLeft:"4px",fontSize:"11px",fontWeight:"700",
+        cursor:"pointer",outline:"none",display:"flex",alignItems:"center",gap:"3px",
+        transition:"background .2s,filter .15s",whiteSpace:"nowrap",
+      });
+      const _batchSetLabel=()=>{ _batchBtn.innerHTML=`×${S.batchCount||1} <span style="font-size:7px">▾</span>`; };
+      _batchSetLabel();
+      _batchBtn.title="Number of images per generation";
+      _batchBtn.onmouseenter=()=>{ if(!S.generating) _batchBtn.style.filter="brightness(1.08)"; };
+      _batchBtn.onmouseleave=()=>{ _batchBtn.style.filter=""; };
+
+      const _batchDrop=mk("div",{
+        position:"absolute",bottom:"calc(100% + 5px)",right:"0",
+        background:C.bg1,border:`1px solid ${C.borderH}`,borderRadius:"8px",
+        display:"none",flexDirection:"column",zIndex:"200",overflow:"hidden",
+        boxShadow:"0 4px 20px rgba(0,0,0,.7)",minWidth:"96px",
+      });
+      let _batchDropOpen=false;
+      const _closeBatchDrop=()=>{ _batchDrop.style.display="none"; _batchDropOpen=false; };
+      [1,2,3,4].forEach(n=>{
+        const row=mk("div",{padding:"7px 12px",fontSize:"11px",fontWeight:"600",cursor:"pointer",
+          color:n===(S.batchCount||1)?LIME:C.text,display:"flex",alignItems:"center",gap:"7px",
+          transition:"background .1s,color .1s",userSelect:"none"});
+        tx(row,`${n} image${n>1?"s":""}`);
+        row.onmouseenter=()=>{ row.style.background="rgba(240,255,65,.1)"; };
+        row.onmouseleave=()=>{ row.style.background=""; };
+        row.onclick=(e)=>{ e.stopPropagation();
+          S.batchCount=n; persist(); _batchSetLabel();
+          [..._batchDrop.children].forEach((c,i)=>{ c.style.color=(i+1)===n?LIME:C.text; });
+          _closeBatchDrop();
+          if(typeof _refreshPaintBatchNote==="function") _refreshPaintBatchNote();
+        };
+        _batchDrop.appendChild(row);
+      });
+      _batchBtn.onclick=(e)=>{ e.stopPropagation();
+        _batchDropOpen=!_batchDropOpen; _batchDrop.style.display=_batchDropOpen?"flex":"none"; };
+      document.addEventListener("click",()=>{ if(_batchDropOpen) _closeBatchDrop(); });
+      _batchDrop.addEventListener("click",e=>e.stopPropagation());
+      _batchWrap.append(_batchBtn,_batchDrop);
+
+      genRow.append(genBtn,_batchWrap,stopBtn);
       // seedRow is prepended to genRow's parent in leftPanel.append below
 
       // ── LEFT PANEL ASSEMBLY ──────────────────────────────────────────────
@@ -6421,6 +6845,33 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         comparerGenImg.style.width=(comparerWrap.offsetWidth||620)+"px";
       };
 
+      // Activate the before/after comparer for a finished result. `afterUrl` is the
+      // generated image; the "before" depends on the mode (input image 1, or the POSE
+      // skeleton URL via `beforeUrlOverride`). Returns true if a comparer was shown,
+      // false for modes that have no before/after (e.g. plain T2I). Shared by both the
+      // saved (showFinal) and unsaved temp (showTemp) result paths.
+      // Resolve the comparer "before" URL for a mode (null = mode has no before/after).
+      const _comparerBeforeUrl=(snapMode,snapImg1,beforeUrlOverride)=>{
+        if(snapMode==="pose"&&beforeUrlOverride) return beforeUrlOverride; // DWPose skeleton
+        if(snapImg1 && (snapMode==="edit"||snapMode==="faceswap"||snapMode==="i2i"
+            ||snapMode==="sketch"||snapMode==="inpaint"||snapMode==="outpaint")){
+          return api.apiURL(`/view?filename=${encodeURIComponent(snapImg1)}&type=input&subfolder=`);
+        }
+        return null;
+      };
+      const _applyComparer=(afterUrl,snapMode,snapImg1,beforeUrlOverride)=>{
+        const beforeUrl=_comparerBeforeUrl(snapMode,snapImg1,beforeUrlOverride);
+        if(!beforeUrl){ comparerWrap.style.display="none"; return false; }
+        finalImg.style.display="none";
+        comparerGenImg.src=afterUrl;
+        comparerGenImg.style.width=(previewBox.offsetWidth||620)+"px";
+        comparerBase.src=beforeUrl;
+        comparerWrap.style.display="block";
+        previewUseWrap.style.display="block";
+        _cmpSetPct(100);
+        return true;
+      };
+
       comparerWrap.addEventListener("mousedown",e=>{
         _cmpDragging=true;e.preventDefault();
       });
@@ -6440,7 +6891,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
 
       // "Use as…" dropdown — top-right of previewBox, visible after generation
       const previewUseWrap=mk("div",{
-        position:"absolute",top:"10px",right:"10px",zIndex:"6",display:"none",
+        // zIndex above the Save button / auto-save toggle (both z6) so the "Use as…"
+        // dropdown, which lives inside this wrapper's stacking context, opens OVER them
+        // rather than behind. (A child's z-index can't escape its parent's stack level.)
+        position:"absolute",top:"10px",right:"10px",zIndex:"10",display:"none",
       });
       const previewUseBtn=mk("button",{
         background:"rgba(20,20,20,.88)",color:"rgba(255,255,255,.88)",
@@ -6464,9 +6918,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         scrollbarWidth:"thin",scrollbarColor:`${C.border} transparent`,
       });
       // Compact rows so the whole list (incl. Pose) fits without overflowing.
-      const _mkPUSection=(label)=>{ const h=mk("div",{padding:"5px 12px 2px",fontSize:"8px",fontWeight:"700",letterSpacing:".08em",textTransform:"uppercase",color:C.muted,userSelect:"none"});tx(h,label);return h; };
+      const _mkPUSection=(label)=>{ const h=mk("div",{padding:"3px 12px 2px",fontSize:"8px",fontWeight:"700",letterSpacing:".08em",textTransform:"uppercase",color:C.muted,userSelect:"none"});tx(h,label);return h; };
       const _mkPUItem=(label,icon,fn)=>{ const row=mk("div",{padding:"5px 12px",fontSize:"10px",fontWeight:"500",color:C.text,cursor:"pointer",display:"flex",alignItems:"center",gap:"7px",transition:"background .1s,color .1s",userSelect:"none"});const ico=mk("span",{fontSize:"11px",width:"14px",textAlign:"center",flexShrink:"0",color:C.muted});tx(ico,icon);const lbl=mk("span");tx(lbl,label);row.append(ico,lbl);row.onmouseenter=()=>{row.style.background="rgba(240,255,65,.10)";row.style.color=LIME;ico.style.color=LIME;};row.onmouseleave=()=>{row.style.background="";row.style.color=C.text;ico.style.color=C.muted;};row.onclick=()=>{previewUseDrop.style.display="none";_puDropOpen=false;fn();};return row; };
-      const _mkPUDivider=()=>mk("div",{height:"1px",background:C.border,margin:"2px 0"});
+      const _mkPUDivider=()=>mk("div",{height:"1px",background:C.border,margin:"1px 0"});
 
       const _getLastSrc=()=>_lastGenObj||(_galImages&&_galImages[0]);
       const _puUpload=async(fn)=>{ const v=_getLastSrc();if(!v)return;try{const n=await _uploadOutputToInput(v);fn(n);}catch(e){console.warn("[FluxKlein] use-as:",e);} };
@@ -6581,20 +7035,99 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         const src=_getLastSrc();
         if(!src) return;
         _deleteImage(src,previewDelBtn,()=>{
+          _galNeedsRefresh=true;
+          // If we're viewing a batch, drop the deleted entry and stay in the batch
+          // (show the next image, or fall back to the placeholder when none remain).
+          if(_batchImgs.length){
+            _batchImgs.splice(_batchIdx,1);
+            if(_batchImgs.length){
+              _batchNav.style.display=_batchImgs.length>1?"flex":"none";
+              _batchShow(_batchIdx); // _batchShow wraps the index for us
+              return;
+            }
+            _batchNav.style.display="none"; _batchTemp=false;
+          }
           // Hide preview, show placeholder, clear _lastGenObj
           finalImg.src="";finalImg.style.display="none";
           comparerWrap.style.display="none";
           previewUseWrap.style.display="none";
           previewDelBtn.style.display="none";
+          previewSaveBtn.style.display="none";
           placeholder.style.display="flex";
           _lastGenObj=null;
-          _galNeedsRefresh=true;
+          _pushOutput(null); // nothing shown → clear the downstream output
         });
       };
 
       // Comparer activates automatically in EDIT mode after generation
 
-      previewBox.append(placeholder,finalImg,comparerWrap,previewUseWrap,previewDelBtn,progWrap);
+      // ── Save button (shown for unsaved temp results when auto-save is off) ──
+      const previewSaveBtn=mk("button",{
+        position:"absolute",bottom:"10px",right:"10px",zIndex:"6",
+        height:"28px",padding:"0 11px",borderRadius:"8px",
+        background:"rgba(240,255,65,.9)",border:"1px solid rgba(240,255,65,.5)",
+        color:"#111",cursor:"pointer",outline:"none",fontSize:"10px",fontWeight:"700",
+        letterSpacing:".04em",display:"none",alignItems:"center",gap:"5px",
+        backdropFilter:"blur(4px)",transition:"filter .15s",
+      });
+      previewSaveBtn.title="Save this image to the gallery";
+      previewSaveBtn.innerHTML=`<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span>`;
+      previewSaveBtn.onmouseenter=()=>previewSaveBtn.style.filter="brightness(1.08)";
+      previewSaveBtn.onmouseleave=()=>previewSaveBtn.style.filter="";
+
+      // ── Auto-save toggle (compact pill, bottom-right, left of Save/Delete; T2I only) ──
+      const autoSaveTog=mk("div",{
+        position:"absolute",bottom:"10px",right:"10px",zIndex:"6",display:"none",
+        alignItems:"center",gap:"6px",cursor:"pointer",userSelect:"none",
+        background:"rgba(20,20,20,.78)",border:"1px solid rgba(255,255,255,.18)",
+        borderRadius:"7px",padding:"4px 9px",backdropFilter:"blur(4px)",
+      });
+      const _asTrack=mk("div",{width:"26px",height:"14px",borderRadius:"7px",position:"relative",
+        transition:"background .18s",flexShrink:"0"});
+      const _asThumb=mk("div",{position:"absolute",top:"2px",width:"10px",height:"10px",
+        borderRadius:"50%",transition:"left .18s,background .18s"});
+      _asTrack.appendChild(_asThumb);
+      const _asLbl=mk("span",{fontSize:"9px",fontWeight:"700",color:"rgba(255,255,255,.85)",
+        letterSpacing:".03em",whiteSpace:"nowrap"});
+      tx(_asLbl,"Auto-save");
+      autoSaveTog.append(_asTrack,_asLbl);
+      const _asApply=()=>{
+        const on=S.autoSave!==false;
+        _asTrack.style.background=on?"rgba(240,255,65,.85)":"rgba(255,255,255,.14)";
+        _asThumb.style.left=on?"14px":"2px";
+        _asThumb.style.background=on?"#111":"#888";
+        autoSaveTog.title=on?"Auto-save is on — every result is kept":"Auto-save is off — use Save to keep a result";
+      };
+      _asApply();
+      autoSaveTog.onclick=()=>{ S.autoSave=!(S.autoSave!==false); persist(); _asApply(); };
+
+      // Toggle sits flush right (right:10px) when there's no Save/Delete button, and
+      // shifts left (right:82px) only when one of them is shown, so it doesn't leave a
+      // gap where those buttons would be. Watch their display and reposition.
+      const _posAutoSaveTog=()=>{
+        // No button → flush right. Delete is a narrow icon (~28px); Save is a wider
+        // labelled button (~64px) — offset the toggle accordingly so there's no gap.
+        if(previewSaveBtn.style.display!=="none")      autoSaveTog.style.right="82px";
+        else if(previewDelBtn.style.display!=="none")  autoSaveTog.style.right="46px";
+        else                                           autoSaveTog.style.right="10px";
+      };
+      _posAutoSaveTog();
+      const _btnVisObserver=new MutationObserver(_posAutoSaveTog);
+      _btnVisObserver.observe(previewSaveBtn,{attributes:true,attributeFilter:["style"]});
+      _btnVisObserver.observe(previewDelBtn,{attributes:true,attributeFilter:["style"]});
+
+      // ── Send-downstream toggle (compact pill, bottom-LEFT of preview) ──────
+      // Mirrors the auto-save toggle's look. Controls whether a finished result is
+      // auto-sent to the node's IMAGE output (auto-running the connected graph) or
+      // just cached for the user's next manual Run. Lives bottom-left so it sits near
+      // Generate and the Save/auto-save controls without overlapping them (those are
+      // bottom-right). Visible in every mode.
+      // No "Send result" toggle: the wire itself is the switch. If the IMAGE output is
+      // connected, the result flows downstream; if nothing is connected, nothing is sent.
+      // This matches how all of ComfyUI's node pipelines behave — no hidden "connected but
+      // inactive" state to confuse the user.
+
+      previewBox.append(placeholder,finalImg,comparerWrap,previewUseWrap,previewSaveBtn,previewDelBtn,autoSaveTog,progWrap);
       rightPanel.appendChild(previewBox);
 
       mainRow.append(leftPanel,rightPanel);
@@ -8018,6 +8551,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         stopBtn.style.maxWidth="0";stopBtn.style.minWidth="0";stopBtn.style.width="0";stopBtn.style.opacity="0";stopBtn.style.padding="0";stopBtn.style.marginLeft="0";
         progWrap.style.display="none";
         if(_lastGenObj) previewDelBtn.style.display="flex";
+        autoSaveTog.style.display="flex"; // restore after generating (all modes)
       };
 
       const resetBtn=()=>{
@@ -8025,7 +8559,58 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         S._preRunFiles=new Set();persist();_resetGenBtn();
       };
 
-      let _lastGenObj=null; // {filename, subfolder} of the most recently generated image
+      let _lastGenObj=null; // {filename, subfolder, type} of the currently shown image
+
+      // ── Image output (downstream) ─────────────────────────────────────────
+      // Pushes the currently shown image to the Python backend (keyed by node id),
+      // so the node's IMAGE output hands it to connected nodes on the next graph run.
+      // Called whenever the shown image changes (new result, batch step, save).
+      // Returns the fetch promise so auto-send can await it before running the graph.
+      let _outPendingPush=null;
+      const _pushOutput=(obj)=>{
+        const body=obj
+          ? {node_id:String(_liveId()),filename:obj.filename,subfolder:obj.subfolder||"",type:obj.type||"output"}
+          : {node_id:String(_liveId()),filename:""};
+        _outPendingPush=fetch("/flux_klein/set_output",{
+          method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),
+        }).then(()=>true).catch(e=>{ console.warn("[FluxKlein] set_output:",fmtErr(e)); return false; });
+        return _outPendingPush;
+      };
+      // Runs the visible ComfyUI graph once (used to push output downstream / auto-send).
+      // Marks the run as throwaway so this node's WS handlers ignore its events (no image
+      // re-show, no sound). The flag clears on that run's execution_success.
+      const _fkQueueGraph=()=>{
+        _oneNodeThrowawayBegin();
+        try{
+          if(app&&typeof app.queuePrompt==="function"){ const r=app.queuePrompt(0,1); if(r&&r.then) r.catch(()=>{}); return true; }
+        }catch(e){}
+        try{
+          if(app&&app.extensionManager&&typeof app.extensionManager.queuePrompt==="function"){ app.extensionManager.queuePrompt(0,1); return true; }
+        }catch(e){}
+        _oneNodeThrowawayEnd(); // queue failed → nothing will clear it, so reset now
+        return false;
+      };
+      // After a result is shown, optionally auto-run the visible graph once so the
+      // image flows into connected nodes (e.g. an upscaler). Off → image is cached and
+      // propagates on the user's next manual Run. Mirrors the gemma node's behaviour.
+      const autoSend=async()=>{
+        const pending=_outPendingPush; // ensure the image was registered server-side first
+        if(pending) await pending;
+        const node=app.graph.getNodeById(_liveId())||self;
+        const out=node&&node.outputs&&node.outputs[0];
+        const linked=out&&out.links&&out.links.length>0;
+        if(!linked) return; // nothing downstream — the wire is the switch, no link = no send
+        // One Node family chaining: poke any One Node wired to our output (e.g. a future
+        // LTX node) to generate from this result — directly, no graph run.
+        const {hadPlain}=_oneNodeChainForward(node.id);
+        // Only run the graph when a PLAIN (non-One-Node) node is wired downstream — e.g.
+        // a Preview Image or upscaler that needs our IMAGE output. If every target is a
+        // One Node, the poke already handles it and a graph run would just push a stale
+        // (no-op) image into those plain nodes prematurely.
+        if(hadPlain && !_fkQueueGraph()){
+          console.warn("[FluxKlein] Could not auto-run the graph to send the image downstream; press Run manually. The image is cached and will propagate on the next run.");
+        }
+      };
 
       let _previewBlobUrl=null;
       const showPreview=(url)=>{
@@ -8055,8 +8640,11 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _resetGenBtn();
         if(soundEnabled)playDone();
         _galNeedsRefresh=true;
-        if(filename) _lastGenObj={filename,subfolder:subfolder||""};
+        if(filename){ _lastGenObj={filename,subfolder:subfolder||"",type:"output"}; _pushOutput(_lastGenObj); }
         placeholder.style.display="none";
+        _batchNav.style.display="none"; _batchImgs=[]; _batchTemp=false;
+        finalImg.style.cursor="";
+        previewSaveBtn.style.display="none";
 
         // Save metadata — use snapshot captured at Generate click time
         const meta=S._pendingMeta?{v:1,...S._pendingMeta}:{v:1,prompt:S.prompt,w:getEffectiveW(),h:getEffectiveH(),mode:activePill};
@@ -8067,46 +8655,197 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           }).catch(e=>console.warn("[FluxKlein] save_meta:",e));
         }
 
-        const _showComparer=(img1InputName)=>{
-          finalImg.style.display="none";
-          comparerGenImg.src=url;
-          comparerGenImg.style.width=(previewBox.offsetWidth||620)+"px";
-          comparerBase.src=api.apiURL(`/view?filename=${encodeURIComponent(img1InputName)}&type=input&subfolder=`);
-          comparerWrap.style.display="block";
-          previewUseWrap.style.display="block";
-          _cmpSetPct(100);
-        };
-        // before/after where the "before" is an arbitrary URL (e.g. POSE skeleton).
-        const _showComparerUrl=(beforeUrl)=>{
-          finalImg.style.display="none";
-          comparerGenImg.src=url;
-          comparerGenImg.style.width=(previewBox.offsetWidth||620)+"px";
-          comparerBase.src=beforeUrl;
-          comparerWrap.style.display="block";
-          previewUseWrap.style.display="block";
-          _cmpSetPct(100);
-        };
         // Use snapshot mode/image so switching pills mid-generation doesn't corrupt comparer
         const _snapMode=S._pendingMeta?.mode||activePill;
         const _snapImg1=S._pendingMeta?.image1||null;
-        const _isSketchResult=_snapMode==="sketch"&&_snapImg1;
-        const _isPaintResult=(_snapMode==="inpaint"||_snapMode==="outpaint")&&_snapImg1;
-        if(_snapMode==="pose"&&_poseSkeletonUrl){
-          _showComparerUrl(_poseSkeletonUrl); // before = DWPose skeleton, after = result
-        } else if(_snapMode==="edit"&&_snapImg1){
-          _showComparer(_snapImg1);
-        } else if(_isSketchResult||_isPaintResult){
-          _showComparer(_snapImg1);
-        } else if(_snapMode==="faceswap"&&_snapImg1){
-          _showComparer(_snapImg1);
-        } else if(_snapMode==="i2i"&&_snapImg1){
-          _showComparer(_snapImg1);
-        } else {
-          comparerWrap.style.display="none";
+        if(!_applyComparer(url,_snapMode,_snapImg1,_poseSkeletonUrl)){
           finalImg.src=url;finalImg.style.display="block";
         }
         previewUseWrap.style.display="block";
         if(filename) previewDelBtn.style.display="flex";
+      };
+
+      // ── T2I batch result: multiple images, click through them ─────────────
+      let _batchImgs=[];   // [{filename, subfolder, url}]
+      let _batchIdx=0;
+      const _batchNav=mk("div",{
+        position:"absolute",bottom:"10px",left:"50%",transform:"translateX(-50%)",
+        zIndex:"6",display:"none",alignItems:"center",gap:"8px",
+        background:"rgba(20,20,20,.82)",border:"1px solid rgba(255,255,255,.2)",
+        borderRadius:"8px",padding:"4px 6px",backdropFilter:"blur(4px)",
+        boxShadow:"0 2px 8px rgba(0,0,0,.5)",
+      });
+      const _mkBatchArrow=(svg)=>{ const b=mk("button",{background:"transparent",border:"none",
+        color:"rgba(255,255,255,.85)",cursor:"pointer",padding:"2px 4px",outline:"none",
+        display:"flex",alignItems:"center",lineHeight:"0",borderRadius:"4px"});
+        b.innerHTML=svg; b.onmouseenter=()=>b.style.color=LIME; b.onmouseleave=()=>b.style.color="rgba(255,255,255,.85)"; return b; };
+      const _batchPrev=_mkBatchArrow(`<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>`);
+      const _batchNext=_mkBatchArrow(`<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>`);
+      const _batchCounter=mk("span",{fontSize:"10px",fontWeight:"700",color:"#fff",minWidth:"30px",textAlign:"center",letterSpacing:".03em"});
+      _batchNav.append(_batchPrev,_batchCounter,_batchNext);
+      previewBox.appendChild(_batchNav);
+
+      // _batchTemp: when true, _batchImgs hold UNSAVED temp images (auto-save off).
+      // Each entry may carry .saved=true once the user saves it.
+      let _batchTemp=false;
+      // Snapshot of the mode/input for the current result set, so each image shown
+      // (single or batch, saved or temp) can still get the before/after comparer
+      // (EDIT, POSE, FACESWAP, I2I, PAINT). The "before" is shared across the batch.
+      let _batchSnapMode=null, _batchSnapImg1=null, _batchSnapSkeleton=null;
+      const _batchShow=(i)=>{
+        if(!_batchImgs.length) return;
+        _batchIdx=(i+_batchImgs.length)%_batchImgs.length;
+        const b=_batchImgs[_batchIdx];
+        // Comparer modes show before/after for each image; the "after" is the current
+        // batch image, the "before" is the shared input/skeleton from the snapshot.
+        const _cmpShown=_applyComparer(b.url,_batchSnapMode,_batchSnapImg1,_batchSnapSkeleton);
+        if(!_cmpShown){
+          finalImg.src=b.url; finalImg.style.display="block";
+        }
+        // In comparer mode the image is hidden (comparer handles the drag), so the
+        // click-to-step affordance only applies to the flat-image batch view.
+        finalImg.style.cursor=(!_cmpShown && _batchImgs.length>1)?"pointer":"";
+        tx(_batchCounter,`${_batchIdx+1} / ${_batchImgs.length}`);
+        if(_batchTemp){
+          // Temp result: offer Save (unless already saved); no delete (not in gallery yet).
+          // _lastGenObj must always point at the CURRENTLY shown image (with its type),
+          // so "Use as…" / delete act on it — not on a stale gallery image. Unsaved temp
+          // images live in the temp folder; saved ones moved to output.
+          _lastGenObj=b.saved
+            ? {filename:b.savedName,subfolder:b.savedSub,type:"output"}
+            : {filename:b.filename,subfolder:b.subfolder,type:"temp"};
+          previewSaveBtn.style.display=b.saved?"none":"flex";
+          previewDelBtn.style.display=b.saved?"flex":"none";
+        } else {
+          _lastGenObj={filename:b.filename,subfolder:b.subfolder,type:"output"};
+          previewSaveBtn.style.display="none";
+          previewDelBtn.style.display="flex";
+        }
+        // Keep the downstream output in sync with whichever batch image is shown.
+        _pushOutput(_lastGenObj);
+      };
+      _batchPrev.onclick=(e)=>{ e.stopPropagation(); _batchShow(_batchIdx-1); };
+      _batchNext.onclick=(e)=>{ e.stopPropagation(); _batchShow(_batchIdx+1); };
+
+      // Open the fullscreen overlay on the currently shown result (single or batch).
+      // Renders an image, or a before/after comparer for comparer modes. Wires up the
+      // batch nav so the fullscreen ‹ › buttons / arrow keys step through the batch
+      // (keeping the in-UI preview in sync via _batchShow).
+      const _openFsCurrent=(isNav)=>{
+        const fs=_initNodeFsOverlay();
+        // Determine current image + (optional) comparer "before".
+        let curUrl="", before=null;
+        if(_batchImgs.length){
+          const b=_batchImgs[_batchIdx];
+          curUrl=b.url;
+          before=_comparerBeforeUrl(_batchSnapMode,_batchSnapImg1,_batchSnapSkeleton);
+        } else if(comparerWrap.style.display!=="none"&&comparerGenImg.src){
+          curUrl=comparerGenImg.src; before=comparerBase.src;
+        } else if(finalImg.style.display!=="none"&&finalImg.src){
+          curUrl=finalImg.src;
+        }
+        if(!curUrl) return;
+        fs._navInfo={ count:_batchImgs.length, idx:_batchIdx };
+        fs._navHook=(dir)=>{ _batchShow(_batchIdx+dir); _openFsCurrent(true); };
+        const type=before?"comparer":"image";
+        // On batch step, swap the media in place (no DOM rebuild) to avoid the flash.
+        if(isNav && fs._updateMedia(type,curUrl,before)) return;
+        if(before){
+          fs._open("comparer",curUrl,"Before / After",{genSrc:curUrl,baseSrc:before});
+        } else {
+          fs._open("image",curUrl,_batchImgs.length>1?`${_batchIdx+1} / ${_batchImgs.length}`:"Preview");
+        }
+      };
+
+      // Click the preview to step through a batch: right half → next, left half → prev.
+      finalImg.addEventListener("click",(e)=>{
+        if(_batchImgs.length<2) return;
+        const r=finalImg.getBoundingClientRect();
+        if(e.clientX-r.left > r.width/2) _batchShow(_batchIdx+1);
+        else _batchShow(_batchIdx-1);
+      });
+
+      // Save the currently shown temp image into the gallery (auto-save off).
+      const _saveCurrentTemp=async()=>{
+        if(!_batchTemp||!_batchImgs.length) return;
+        const b=_batchImgs[_batchIdx];
+        if(b.saved) return;
+        const meta=S._pendingMeta?{v:1,...S._pendingMeta}:{v:1,prompt:S.prompt,w:getEffectiveW(),h:getEffectiveH(),mode:activePill};
+        try{
+          const r=await api.fetchApi("/flux_klein/save_temp",{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({filename:b.filename,subfolder:b.subfolder,meta}),
+          });
+          const d=await r.json();
+          if(d.ok){
+            b.saved=true; b.savedName=d.filename; b.savedSub=d.subfolder||"";
+            _galNeedsRefresh=true;
+            _batchShow(_batchIdx); // refresh Save/Delete button state
+          } else { console.warn("[FluxKlein] save_temp failed:",d.error); }
+        }catch(e){ console.warn("[FluxKlein] save_temp error:",fmtErr(e)); }
+      };
+      previewSaveBtn.onclick=(e)=>{ e.stopPropagation(); _saveCurrentTemp(); };
+
+      // Show unsaved temp results (auto-save off). One or many (batch).
+      const showTemp=(images)=>{
+        if(_previewBlobUrl){ URL.revokeObjectURL(_previewBlobUrl); _previewBlobUrl=null; }
+        clearError();S.generating=false;S.previewUrl=null;_activePromptId=null;persist();
+        _resetGenBtn();
+        if(soundEnabled)playDone();
+        placeholder.style.display="none";
+        comparerWrap.style.display="none";
+        previewUseWrap.style.display="block";
+        const cb=Date.now();
+        _batchTemp=true;
+        // Capture mode/input snapshot so the comparer (before/after) works for temp results too.
+        _batchSnapMode=S._pendingMeta?.mode||activePill;
+        _batchSnapImg1=S._pendingMeta?.image1||null;
+        _batchSnapSkeleton=_poseSkeletonUrl;
+        _batchImgs=images.map(im=>({
+          filename:im.filename, subfolder:im.subfolder||"", saved:false,
+          url:api.apiURL(`/view?filename=${encodeURIComponent(im.filename)}&type=${encodeURIComponent(im.type||"temp")}&subfolder=${encodeURIComponent(im.subfolder||"")}&t=${cb}`),
+        }));
+        _batchShow(0);
+        _batchNav.style.display=_batchImgs.length>1?"flex":"none";
+        // Auto-save off path: _batchShow already pushed the temp image to the output;
+        // trigger the downstream auto-run here (execution_success won't, since
+        // generating is already false by the time it fires for the temp/PreviewImage run).
+        autoSend();
+      };
+
+      const showFinalBatch=(images)=>{
+        if(_previewBlobUrl){ URL.revokeObjectURL(_previewBlobUrl); _previewBlobUrl=null; }
+        clearError();S.generating=false;S.previewUrl=null;_activePromptId=null;persist();
+        _resetGenBtn();
+        if(soundEnabled)playDone();
+        _galNeedsRefresh=true;
+        placeholder.style.display="none";
+        comparerWrap.style.display="none";
+        previewUseWrap.style.display="block";
+
+        const cb=Date.now();
+        _batchTemp=false;
+        previewSaveBtn.style.display="none";
+        // Capture snapshot so the comparer (before/after) works for batch results too.
+        _batchSnapMode=S._pendingMeta?.mode||activePill;
+        _batchSnapImg1=S._pendingMeta?.image1||null;
+        _batchSnapSkeleton=_poseSkeletonUrl;
+        _batchImgs=images.map(im=>({
+          filename:im.filename, subfolder:im.subfolder||"",
+          url:api.apiURL(`/view?filename=${encodeURIComponent(im.filename)}&type=output&subfolder=${encodeURIComponent(im.subfolder||"")}&t=${cb}`),
+        }));
+
+        // Save metadata for every image in the batch (same snapshot for all).
+        const meta=S._pendingMeta?{v:1,...S._pendingMeta}:{v:1,prompt:S.prompt,w:getEffectiveW(),h:getEffectiveH(),mode:activePill};
+        _batchImgs.forEach(b=>{
+          api.fetchApi("/flux_klein/save_meta",{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({filename:b.filename,subfolder:b.subfolder,meta}),
+          }).catch(e=>console.warn("[FluxKlein] save_meta(batch):",e));
+        });
+
+        _batchShow(0);
+        _batchNav.style.display=_batchImgs.length>1?"flex":"none";
       };
 
       const _slotErr=(slot,lbl)=>{ slot.el.style.borderColor="#e05555"; tx(lbl,"Required!"); lbl.style.color="#e05555"; };
@@ -8115,12 +8854,19 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         // Empty prompt is allowed in every mode — at worst it just doesn't change the
         // image (Edit/I2I) or produces something generic (T2I); nothing breaks.
         if(activePill==="inpaint"){
+          // No mode picked yet? If there's an image in the slot, just treat it as a
+          // plain sketch pass (use the image as-is). Inpaint/outpaint still need a mask,
+          // so they only kick in once the user has actually drawn one (_maskName set).
+          if(_paintMode!=="sketch"&&_paintMode!=="inpaint"&&_paintSlot.hasFile()&&!_maskName){
+            _setPaintMode("sketch");
+          }
           if(_paintMode==="sketch"){
             if(!_paintSlot.hasFile()){ _slotErr(_paintSlot,_paintSlotLbl); return; }
           } else if(_paintMode==="inpaint"){
             if(!_maskName){ showError("PAINT / Inpaint: open Inpaint, draw a mask and confirm it first."); return; }
             if(_maskName!=="__outpaint__"&&!_paintSlot.hasFile()){ _slotErr(_paintSlot,_paintSlotLbl); return; }
           } else {
+            // Nothing in the slot at all → genuinely needs an image.
             _slotErr(_paintSlot,_paintSlotLbl); return;
           }
         }
@@ -8136,10 +8882,22 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           if(!_poseRefSlot.hasFile()){_slotErr(_poseRefSlot,_poseRefLbl);return;}
           if(!S.poseLora||S.poseLora==="none"){showError("POSE: select a Pose LoRA in Settings.");return;}
         }
-        const _hasExtModel=(()=>{ const n=app.graph.getNodeById(self.id); const inputs=n?.inputs||[]; const slot=inputs.find(i=>i.name==="model"); return slot?.link!=null; })();
+        const _hasExtModel=(()=>{ const n=app.graph.getNodeById(_liveId()); const inputs=n?.inputs||[]; const slot=inputs.find(i=>i.name==="model"); return slot?.link!=null; })();
         if(!S.model&&!_hasExtModel){showError("No model selected. Open Settings and choose a model.");return;}
 
+        // Make this node the active one for WS events — important when generation is
+        // triggered programmatically (One Node chain poke) without a prior click/focus.
+        _activeS=S; _activeShowFinal=showFinal; _activeShowFinalBatch=showFinalBatch;
+        _activeShowTemp=showTemp; _activeAutoSend=autoSend; _activeShowPreview=showPreview;
+        _activeResetBtn=resetBtn; _activeSetStage=setStage; _activeShowError=showError;
+        _activePoseSkeleton=poseSkeleton; _activePromptIdRef=()=>_activePromptId;
+
+        // Real user-initiated generation: clear any stuck throwaway flag so events show.
+        _oneNodeThrowawayForceClear();
+
         clearError();S.generating=true;_poseSkeletonUrl=null;
+        _batchNav.style.display="none";_batchImgs=[];_batchTemp=false;
+        previewSaveBtn.style.display="none";
 
         // Snapshot all meta-relevant state at click time so mid-generation UI changes don't corrupt metadata
         const _isSketchSnap=activePill==="inpaint"&&_paintMode==="sketch";
@@ -8184,6 +8942,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         genBtn.style.animation="fk-gradient 2.4s ease infinite";
         genBtn.style.color=LIME;genBtn.style.border="2px solid transparent";
         previewDelBtn.style.display="none";
+        autoSaveTog.style.display="none"; // hidden while generating; restored on completion
         requestAnimationFrame(()=>{
           stopBtn.style.maxWidth="120px";stopBtn.style.minWidth="";stopBtn.style.width="";stopBtn.style.opacity="1";stopBtn.style.padding="0 14px";stopBtn.style.marginLeft="6px";
         });
@@ -8222,6 +8981,47 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
 
         const prompt=JSON.parse(JSON.stringify(wfData));
         const set=(id,key,val)=>{ if(prompt[id]) prompt[id].inputs[key]=val; };
+        // Auto-save off: turn the given mode's SaveImage node into a temp PreviewImage,
+        // so nothing lands in the gallery until the user hits Save. Records the node id
+        // so the "executed" listener can pick up its temp output. Each mode calls this
+        // with its own save node id after it has set the filename_prefix.
+        const _applyAutoSave=(saveId)=>{
+          _activeSaveNode=saveId;
+          if(S.autoSave===false && prompt[saveId]){
+            const imgsRef=prompt[saveId].inputs.images;
+            prompt[saveId]={ class_type:"PreviewImage", inputs:{images:imgsRef}, _meta:{title:"Preview (unsaved)"} };
+          }
+        };
+        // Batch: produce N images per run. Two shapes:
+        //  • EmptyLatent source (T2I, EDIT, FACESWAP, POSE): just set batch_size on it.
+        //  • VAEEncode / conditioning latent (I2I, INPAINT, OUTPAINT): the latent carries
+        //    the input image, so we splice a RepeatLatentBatch between it and the sampler
+        //    to duplicate it N× (the sampler then gives N noise-varied results).
+        // The conditioning broadcasts over the batch automatically. Returns the count used.
+        // Inpaint AND outpaint are forced to a single image. Both build the latent through
+        // InpaintModelConditioning (with a per-image noise_mask), and inpaint additionally
+        // stitches via InpaintStitchImproved whose crop context is single-image. Splicing a
+        // RepeatLatentBatch of N into that single-image, mask-bound latent path doesn't produce
+        // N independent results (mismatch / only the first is usable), so we cap these to 1.
+        // Inpaint AND outpaint force 1: both run through the inpaint workflow
+        // (InpaintCropImproved + InpaintStitchImproved). Outpaint is exported as an inpaint mask
+        // and routed there (see _maskName==="__outpaint__" handling), so it hits the same
+        // single-stitcher limit — InpaintStitchImproved handles one stitcher/image only.
+        const _batchN=()=>(isInpaintMode||isOutpaintMode)?1:Math.max(1,Math.min(4,+S.batchCount||1));
+        // Snapshot the batch size actually used for THIS submission, so the completion handler
+        // routes the result set by this value rather than the live S.batchCount (which the user
+        // may change mid-run).
+        _activeBatchN=_batchN();
+        const _applyBatchEmpty=(latentId)=>{ set(latentId,"batch_size",_batchN()); };
+        const _applyBatchRepeat=(samplerId,latentInputKey)=>{
+          const n=_batchN();
+          if(n<=1) return;
+          const sampler=prompt[samplerId]; if(!sampler) return;
+          const src=sampler.inputs[latentInputKey]; if(!src) return; // [nodeId, slot]
+          const repId=`${samplerId}:rep`;
+          prompt[repId]={ class_type:"RepeatLatentBatch", inputs:{samples:src,amount:n}, _meta:{title:"Repeat Latent Batch"} };
+          sampler.inputs[latentInputKey]=[repId,0];
+        };
         const _isBase=_isBaseModel();
         const _setAdv=(samplerNodeId,skipDenoise)=>{
           const steps=S.advancedUI?(S.steps||4):(_isBase?20:4);
@@ -8235,8 +9035,43 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           }
         };
 
+        // ── Prompt text input ───────────────────────────────────────────────
+        // The node has an always-present optional STRING "prompt" input. When wired to
+        // a text source, its value REPLACES the prompt box for this run (per the user's
+        // choice). We read the upstream node's static text value so LoRA trigger words
+        // and the POSE trigger are still combined in JS exactly as with the box.
+        // Works for simple text sources (Primitive / Text / String / CLIP Text Encode);
+        // if the upstream value can't be read statically we fall back to the box.
+        const _readPromptInputText=()=>{
+          const node=app.graph.getNodeById(_liveId());
+          if(!node) return null;
+          const slot=(node.inputs||[]).find(i=>i.name==="prompt");
+          if(!slot||slot.link==null) return null;
+          const link=app.graph.links[slot.link];
+          if(!link) return null;
+          const src=app.graph.getNodeById(link.origin_id);
+          if(!src) return null;
+          // Bypassed (mode 4) or muted (mode 2) upstream node: treat it as if it weren't
+          // connected at all, so the prompt falls back to our own prompt box. Otherwise the
+          // node would keep feeding its text even though the user explicitly bypassed it.
+          if(src.mode===2||src.mode===4) return null;
+          // "One Node" siblings (e.g. Gemma 4) are no-op nodes whose text lives in their
+          // own UI state, not a widget. Read their last generated output directly.
+          if(src._g4_S && typeof src._g4_S.lastOutput==="string") return src._g4_S.lastOutput;
+          if(src._fk_S && typeof src._fk_S.prompt==="string") return src._fk_S.prompt;
+          // Standard text nodes: prefer a widget literally named text/string/value/prompt,
+          // else the first string-valued widget on the node.
+          const ws=src.widgets||[];
+          const named=ws.find(w=>/^(text|string|value|prompt)$/i.test(w.name||"")&&typeof w.value==="string");
+          if(named) return named.value;
+          const anyStr=ws.find(w=>typeof w.value==="string");
+          return anyStr?anyStr.value:null;
+        };
+        const _promptInputText=_readPromptInputText();
+        const _basePrompt=(_promptInputText!=null)?_promptInputText:(S.prompt||"");
+
         // Build effective prompt — trigger words from all active LoRAs prepended
-        const _effectivePrompt=await _buildPromptWithTriggers(S.prompt||"");
+        const _effectivePrompt=await _buildPromptWithTriggers(_basePrompt);
 
         const useKV=(S.model||"").toLowerCase().includes("kv");
 
@@ -8244,7 +9079,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         // If the node has optional inputs wired from outside (e.g. a GGUF loader),
         // skip internal loaders and use the external node's output instead.
         // The external node is serialized and added to the prompt so ComfyUI can find it.
-        const _selfNode=app.graph.getNodeById(self.id);
+        const _selfNode=app.graph.getNodeById(_liveId());
         const _extSlot=(name)=>{
           // Toggle off = external inputs are ignored even if a wire is still connected;
           // the internal dropdown model is used. The toggle is the single source of truth.
@@ -8279,6 +9114,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         const extClip =_extSlot("clip");
         const extVae  =_extSlot("vae");
 
+
         // ── LoRA chain helper ───────────────────────────────────────────────
         const _applyLoRAs=(chainSrc,idPrefix)=>{
           const toPrev=(p)=>typeof p==="string"?[p,0]:p;
@@ -8308,11 +9144,38 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           else set(WFI.model,"unet_name",S.model||"flux-2-klein-9b-kv.safetensors");
           if(extClip){ delete prompt[WFI.textEnc]; prompt[WFI.promptPos].inputs.clip=extClip; }
           else set(WFI.textEnc,"clip_name",S.textEncoder||"qwen_3_8b_fp8mixed.safetensors");
-          if(extVae){ delete prompt[WFI.vae]; prompt["FKI:206"].inputs.vae=extVae; prompt["FKI:210"].inputs.vae=extVae; prompt["FKI:164"].inputs.vae=extVae; }
+          if(extVae){ delete prompt[WFI.vae]; prompt["FKI:206"].inputs.vae=extVae; prompt["FKI:210"].inputs.vae=extVae; prompt["FKI:164"].inputs.vae=extVae; if(prompt["FKI:ref2vae"]) prompt["FKI:ref2vae"].inputs.vae=extVae; }
           else set(WFI.vae,"vae_name",S.vae||"flux2-vae.safetensors");
           set(WFI.promptPos,"text",      _effectivePrompt);
           set(WFI.loadImg,  "image",     _paintSlot.name||"example.png");
           set(WFI.loadMask, "image",     _maskName||"example_mask.png");
+
+          // Optional reference image (reference-guided inpainting). When a reference is set,
+          // chain the extra ReferenceLatent pair (FKI:204b/205b) into InpaintModelConditioning
+          // so the model sees the reference alongside the cropped source context. When absent,
+          // strip the ref nodes entirely so ComfyUI doesn't fail loading the placeholder image.
+          if(_paintRefName){
+            set("FKI:ref2img","image",_paintRefName);
+            prompt["FKI:210"].inputs.positive=["FKI:204b",0];
+            prompt["FKI:210"].inputs.negative=["FKI:205b",0];
+            // Downscale the reference before VAE encode (same as EDIT/Sketch). A full-res
+            // reference latent is processed at every sampling step and is the main reason
+            // reference inpainting is slower — capping it to N MP speeds it up a lot.
+            if(S.downscaleRef){
+              const mp=+(S.downscaleRefMP)>0?+(S.downscaleRefMP):1.0;
+              prompt["FKI:refScale"]={
+                class_type:"ImageScaleToTotalPixels",
+                inputs:{image:["FKI:ref2img",0],upscale_method:"lanczos",megapixels:mp,resolution_steps:1},
+                _meta:{title:"Scale Reference (downscale)"},
+              };
+              prompt["FKI:ref2vae"].inputs.pixels=["FKI:refScale",0];
+            }
+          } else {
+            delete prompt["FKI:ref2img"];
+            delete prompt["FKI:ref2vae"];
+            delete prompt["FKI:204b"];
+            delete prompt["FKI:205b"];
+          }
 
           // Resize source image + mask by longer side if enabled in inpaint bar
           const {w:_inpFW,h:_inpFH,resized:_inpResized}=_inpCalcDims();
@@ -8335,6 +9198,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           if(S.randomizeSeed){S.seed=seed;seedInp.setVal(seed);_advSeedInp.setVal(seed);_advSeedRefresh();persist();}
           set(WFI.sampler,"seed",seed); _setAdv(WFI.sampler);
           set(WFI.save,"filename_prefix","one-node-flux-2-klein/FK");
+          _applyAutoSave(WFI.save);
+          _applyBatchRepeat(WFI.sampler,"latent_image"); // latent from InpaintModelConditioning
 
           // KV cache: inpaint workflow already has FKI:216 FluxKVCache wired.
           // If KV not selected, bypass it by wiring UNETLoader directly to KSampler model chain.
@@ -8385,6 +9250,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           }
           set(WFI.crop,"output_target_width",cropTargetW);
           set(WFI.crop,"output_target_height",cropTargetH);
+          // Seam feather — how far the fill blends into the original at the mask edge.
+          // 0 = Auto: leave the workflow default (32px) untouched. >0 overrides it.
+          if(+S.inpFeather>0) set(WFI.crop,"mask_blend_pixels",Math.min(64,+S.inpFeather));
 
         } else if(isOutpaintMode){
           // outpaint_workflow.json receives:
@@ -8412,6 +9280,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           if(S.randomizeSeed){S.seed=seed;seedInp.setVal(seed);_advSeedInp.setVal(seed);_advSeedRefresh();persist();}
           set(WFO.sampler,"seed",seed); _setAdv(WFO.sampler);
           set(WFO.save,"filename_prefix","one-node-flux-2-klein/FK");
+          _applyAutoSave(WFO.save);
+          _applyBatchRepeat(WFO.sampler,"latent_image"); // latent from InpaintModelConditioning
 
           // Resize padded image + mask by longer side if enabled
           const {w:_opFW,h:_opFH,resized:_opResized}=_opCalcDims();
@@ -8475,6 +9345,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
             }
           }
           set(WFF.save,   "filename_prefix","one-node-flux-2-klein/FK");
+          _applyAutoSave(WFF.save);
+          _applyBatchEmpty("FKF:230"); // EmptyFlux2LatentImage → sampler
           // Face LoRA — always set from Settings (validated before reaching here)
           set(WFF.lora,"lora_name",S.fsLora);
 
@@ -8516,6 +9388,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           set(WFP.poseImg,"image",S.poseImage||"placeholder.png");
           set(WFP.refImg, "image",S.poseRef||"placeholder.png");
           set(WFP.save,   "filename_prefix","one-node-flux-2-klein/FK");
+          _applyAutoSave(WFP.save);
+          _applyBatchEmpty("FKP:latent"); // EmptyFlux2LatentImage → SamplerCustomAdvanced
 
           // DWPose detect resolution = the pose image's shorter side (snapped to 64),
           // so the skeleton keeps the pose image's resolution/aspect instead of the
@@ -8612,6 +9486,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           set("FK:166","text",       _effectivePrompt);
           set("FKI2I:img","image",   S.i2iImage||"placeholder.png");
           set("FK:86","filename_prefix","one-node-flux-2-klein/FK");
+          _applyAutoSave("FK:86");
+          _applyBatchRepeat("FK:171","latent_image"); // latent from VAEEncode → repeat for batch
 
           // Resize input image by longer side if enabled (explicit user override).
           // NOTE: the global "downscale reference" toggle is intentionally NOT applied
@@ -8678,6 +9554,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           set(WF.promptPos,"text",_effectivePrompt);
           set(WF.promptNeg,"text",DEFAULT_NEG_PROMPT);
           set(WF.saveImage,"filename_prefix","one-node-flux-2-klein/FK");
+          _applyAutoSave(WF.saveImage);
+          // Batch: T2I, EDIT and SKETCH all feed EmptyFlux2LatentImage (WF.latent)
+          // into the sampler, so a batch_size there produces N images.
+          _applyBatchEmpty(WF.latent);
 
           // ── T2I ──────────────────────────────────────────────────────────
           if(activePill==="t2i"){
@@ -8762,7 +9642,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
             body:JSON.stringify({prompt,client_id:api.clientId,extra_data:{enable_previews:true}}),
           });
           const result=await resp.json();
-          const wfErrs=Object.entries(result.node_errors||{}).filter(([k])=>k!==String(self.id));
+          const wfErrs=Object.entries(result.node_errors||{}).filter(([k])=>k!==String(_liveId()));
           if(result.error){
             showError(fmtErr(result.error));resetBtn();
           }else if(wfErrs.length){
@@ -8785,7 +9665,11 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         posePanel.style.display=activePill==="pose"?"flex":"none";
         if(activePill==="pose") _poseApplyBadges();
         resSect.style.display=(activePill==="inpaint"||activePill==="faceswap"||activePill==="i2i"||activePill==="pose")?"none":"flex";
+        // Batch split-button, auto-save toggle and send-output toggle: every mode.
+        _batchWrap.style.display="block";
+        autoSaveTog.style.display="flex";
         updateSizeControls();
+        if(typeof _refreshPaintBatchNote==="function") _refreshPaintBatchNote();
       }
 
       // ── mkHeart helper (used by gallery) ─────────────────────────────────
@@ -9074,13 +9958,61 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       lbFavBtn.onmouseleave=()=>_lbFavApplyStyle(false);
       lbFavBtn.appendChild(_mkHeart("14px"));
 
-      // Open folder button
+      // "Set as output" button — makes the viewed gallery image this node's IMAGE output, so
+      // the user can feed an older result into a pipeline wired after the node. It only SETS
+      // the output (does not run the graph); the user presses Run when ready. The next real
+      // generation overwrites it automatically (showFinal/showTemp call _pushOutput), so a
+      // gallery pick never "sticks" past the next generate.
+      const lbSetOutBtn=mk("button",{
+        background:"transparent",border:`1px solid ${C.border}`,
+        borderRadius:"6px",padding:"0 10px",fontSize:"10px",color:C.muted,
+        cursor:"pointer",outline:"none",transition:"border-color .15s,color .15s",
+        alignSelf:"stretch",display:"flex",alignItems:"center",gap:"4px",
+        marginLeft:"auto",whiteSpace:"nowrap"}); // marginLeft:auto pushes THIS + lbOpenBtn to the right edge
+      const _lbOutSvg=(()=>{
+        const s=document.createElementNS("http://www.w3.org/2000/svg","svg");
+        s.setAttribute("viewBox","0 0 24 24");s.setAttribute("width","12");s.setAttribute("height","12");
+        s.setAttribute("fill","none");s.setAttribute("stroke","currentColor");s.setAttribute("stroke-width","2");
+        s.setAttribute("stroke-linecap","round");s.setAttribute("stroke-linejoin","round");s.style.flexShrink="0";
+        s.innerHTML=`<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>`;
+        return s;
+      })();
+      lbSetOutBtn.appendChild(_lbOutSvg);
+      const _lbSetOutLbl=mk("span");tx(_lbSetOutLbl,"Set as output");lbSetOutBtn.appendChild(_lbSetOutLbl);
+      lbSetOutBtn.onmouseenter=()=>{ if(lbSetOutBtn.disabled)return; lbSetOutBtn.style.borderColor=LIME;lbSetOutBtn.style.color=LIME; };
+      lbSetOutBtn.onmouseleave=()=>{ if(lbSetOutBtn.disabled)return; lbSetOutBtn.style.borderColor=C.border;lbSetOutBtn.style.color=C.muted; };
+      // Enable only when this node's IMAGE output has a downstream wire — otherwise setting an
+      // output that goes nowhere is meaningless. Called from _lbShow when a gallery image opens.
+      const _lbRefreshSetOut=()=>{
+        const n=app.graph.getNodeById(_liveId());
+        const out=n&&n.outputs&&n.outputs[0];
+        const linked=!!(out&&out.links&&out.links.length>0);
+        lbSetOutBtn.disabled=!linked;
+        lbSetOutBtn.style.opacity=linked?"1":"0.4";
+        lbSetOutBtn.style.cursor=linked?"pointer":"not-allowed";
+        lbSetOutBtn.title=linked
+          ?"Make this image the node's output. Press Run to send it through the connected pipeline."
+          :"Connect the node's image output to something first.";
+      };
+      lbSetOutBtn.onclick=()=>{
+        if(lbSetOutBtn.disabled) return;
+        const v=_lbActiveImg; if(!v) return;
+        // Point the node output at this gallery image (type output — it lives in the gallery).
+        _lastGenObj={filename:v.filename,subfolder:v.subfolder||"",type:"output"};
+        _pushOutput(_lastGenObj);
+        // Brief confirmation, then restore the label.
+        tx(_lbSetOutLbl,"✓ Output set");lbSetOutBtn.style.color=LIME;lbSetOutBtn.style.borderColor=LIME;
+        setTimeout(()=>{ tx(_lbSetOutLbl,"Set as output");lbSetOutBtn.style.color=C.muted;lbSetOutBtn.style.borderColor=C.border; },1400);
+      };
+
+      // Open folder button (sits right after "Set as output" — the marginLeft:auto on that one
+      // pushes the whole right-hand group over, so this one does NOT repeat marginLeft:auto).
       const lbOpenBtn=mk("button",{
         background:"transparent",border:`1px solid ${C.border}`,
         borderRadius:"6px",padding:"0 10px",fontSize:"10px",color:C.muted,
         cursor:"pointer",outline:"none",transition:"border-color .15s,color .15s",
         alignSelf:"stretch",display:"flex",alignItems:"center",gap:"4px",
-        marginLeft:"auto",whiteSpace:"nowrap"});
+        whiteSpace:"nowrap"});
       // Folder SVG icon
       const _lbFolderSvg=(()=>{
         const s=document.createElementNS("http://www.w3.org/2000/svg","svg");
@@ -9236,7 +10168,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         });
       };
 
-      lbInfoRow.append(lbChipRes,lbChipMode,lbChipAdv,lbImgThumb,lbImgThumb2,lbRestoreBtn,_lbUseWrap,lbFavBtn,lbDelBtn,lbOpenBtn);
+      lbInfoRow.append(lbChipRes,lbChipMode,lbChipAdv,lbImgThumb,lbImgThumb2,lbRestoreBtn,_lbUseWrap,lbFavBtn,lbDelBtn,lbSetOutBtn,lbOpenBtn);
 
       // LoRA row — subtle, hidden when no loras
       const lbLoraRow=mk("div",{display:"none",gap:"4px",flexWrap:"wrap",alignItems:"center"});
@@ -9332,6 +10264,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       const lbShow=async(v,idx)=>{
         _lbActiveImg=v;
         _lbIdx=idx??0;
+        _lbRefreshSetOut(); // enable/disable "Set as output" by whether our image output is wired
         tx(lbFilename,v.filename);
         lbImg.src=_galImgUrl(v)+"&t="+v.mtime;
         lbMeta.style.display="none";lbRestoreBtn.style.display="none";
@@ -9538,7 +10471,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       // Upload an output image into ComfyUI's input folder so LoadImage can reference it.
       // Returns the uploaded input filename, or null on failure.
       const _uploadOutputToInput=async(v)=>{
-        const outputUrl=api.apiURL(`/view?filename=${encodeURIComponent(v.filename)}&type=output&subfolder=${encodeURIComponent(v.subfolder||"")}`);
+        // Respect the source type — unsaved temp results live in the temp folder, not
+        // output; fetching them as "output" would grab a wrong (or missing) file.
+        const outputUrl=api.apiURL(`/view?filename=${encodeURIComponent(v.filename)}&type=${encodeURIComponent(v.type||"output")}&subfolder=${encodeURIComponent(v.subfolder||"")}`);
         const resp=await fetch(outputUrl);
         if(!resp.ok) throw new Error("fetch "+resp.status);
         const blob=await resp.blob();
@@ -9804,7 +10739,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       },true);
 
       const _creditEl=mk("div",{
-        position:"absolute",bottom:"5px",left:"12px",right:"12px",
+        position:"absolute",bottom:"1px",left:"12px",right:"12px",
         fontSize:"8px",color:"#555",pointerEvents:"none",
         letterSpacing:".04em",userSelect:"none",zIndex:"1",
         display:"flex",alignItems:"center",justifyContent:"space-between",
@@ -9863,6 +10798,76 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       root.addEventListener("mouseenter",()=>{ _mouseOverRoot=true; });
       root.addEventListener("mouseleave",()=>{ _mouseOverRoot=false; });
 
+      // ── Canvas-like wheel zoom + middle-drag pan over the node ────────────────
+      // Make the node behave like the rest of ComfyUI: wheel over EMPTY node area zooms the
+      // graph, and middle-mouse drag pans it. Interactive elements keep their own behavior —
+      // we forward to the canvas ONLY when the wheel/drag started on non-interactive "chrome".
+      const _fkGraphCanvas=()=>document.querySelector("canvas.litegraph")||document.querySelector("canvas#graph-canvas")||document.querySelector("canvas");
+      // An element is "interactive" (keep native behavior) if it or an ancestor is a form
+      // control, a button, or something that scrolls / captures wheel itself. Everything else
+      // (labels, spacers, panels, the preview image background) is treated as empty node chrome.
+      const _isInteractive=(el)=>{
+        let n=el;
+        for(let i=0;i<12 && n && n!==root; i++){
+          const tag=(n.tagName||"").toUpperCase();
+          if(tag==="TEXTAREA"||tag==="INPUT"||tag==="SELECT"||tag==="BUTTON"||tag==="CANVAS") return true;
+          // Scrollable containers (gallery grid, layers list, presets…) that scroll vertically.
+          if(n.scrollHeight - n.clientHeight > 4){
+            const ov=(n.ownerDocument.defaultView.getComputedStyle(n).overflowY)||"";
+            if(ov==="auto"||ov==="scroll") return true;
+          }
+          // Elements that explicitly mark themselves as wheel-owning (sliders, editors).
+          if(n.dataset && n.dataset.fkWheel==="own") return true;
+          n=n.parentElement;
+        }
+        return false;
+      };
+      // When the Sketch or Mask/Outpaint editor overlay is open, it owns wheel-zoom and
+      // middle-drag pan for its OWN canvas. Our graph zoom/pan must stand down so the two
+      // don't fight (double-panning) while the user is editing.
+      const _fkEditorOpen=()=>(_sketchOv&&_sketchOv.style.display!=="none")||(_maskOv&&_maskOv.style.display!=="none");
+      root.addEventListener("wheel",(e)=>{
+        if(_fkEditorOpen()) return;                     // sketch/mask editor owns wheel-zoom
+        if(_isInteractive(e.target)) return;            // let inputs/sliders/scroll areas handle it
+        const cv=_fkGraphCanvas(); if(!cv) return;
+        cv.dispatchEvent(new WheelEvent("wheel",{
+          deltaY:e.deltaY,deltaX:e.deltaX,clientX:e.clientX,clientY:e.clientY,
+          ctrlKey:e.ctrlKey,metaKey:e.metaKey,bubbles:true,cancelable:true}));
+        e.preventDefault();e.stopPropagation();
+      },{passive:false});
+
+      // Middle-mouse drag → pan the graph. We forward the pointer/mouse sequence to the canvas.
+      // Only start when the press lands on empty chrome (not on a control), so middle-clicking
+      // a button/input still does its own thing.
+      let _fkPanning=false;
+      root.addEventListener("pointerdown",(e)=>{
+        if(e.button!==1) return;                        // middle button only
+        if(_fkEditorOpen()) return;                     // sketch/mask editor owns middle-drag pan
+        if(_isInteractive(e.target)) return;
+        const cv=_fkGraphCanvas(); if(!cv) return;
+        _fkPanning=true;
+        e.preventDefault();e.stopPropagation();
+        const fwd=(type,ev,ptr)=>{
+          const cls=ptr?PointerEvent:MouseEvent;
+          const opts={button:1,buttons:(type==="mouseup"||type==="pointerup")?0:4,
+            clientX:ev.clientX,clientY:ev.clientY,bubbles:true,cancelable:true};
+          if(ptr){opts.pointerId=1;opts.pointerType="mouse";opts.isPrimary=true;}
+          cv.dispatchEvent(new cls(type,opts));
+        };
+        // Forward BOTH pointer and mouse variants — different ComfyUI/litegraph versions listen
+        // on different event families for the middle-button pan.
+        fwd("pointerdown",e,true); fwd("mousedown",e,false);
+        const move=(ev)=>{ if(_fkPanning){ fwd("pointermove",ev,true); fwd("mousemove",ev,false); } };
+        const up=(ev)=>{ if(!_fkPanning) return; _fkPanning=false;
+          fwd("pointerup",ev,true); fwd("mouseup",ev,false);
+          window.removeEventListener("pointermove",move,true);
+          window.removeEventListener("pointerup",up,true); };
+        window.addEventListener("pointermove",move,true);
+        window.addEventListener("pointerup",up,true);
+      });
+      // Suppress the middle-click "autoscroll" / paste that some browsers trigger on the node.
+      root.addEventListener("auxclick",(e)=>{ if(e.button===1 && !_isInteractive(e.target)) e.preventDefault(); });
+
       const _fKeyHandler=(e)=>{
         if(e.key!=="f"&&e.key!=="F") return;
         if(!_mouseOverRoot) return;
@@ -9877,25 +10882,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         if(_sketchOv.style.display!=="none") return;
         if(_nodeFsOv&&_nodeFsOv.style.display!=="none"){_nodeFsOv._close();return;}
 
-        // Get currently visible image
-        let src="", name="", fsType="image", fsOpts=null;
-        if(comparerWrap.style.display!=="none"&&comparerGenImg.src){
-          src=comparerGenImg.src;
-          name="Before / After";
-          fsType="comparer";
-          fsOpts={
-            genSrc:comparerGenImg.src,
-            baseSrc:comparerBase.src,
-          };
-        } else if(finalImg.style.display!=="none"&&finalImg.src){
-          src=finalImg.src;
-          name="Preview";
-        }
-        if(!src) return;
-
         e.preventDefault();
         e.stopPropagation();
-        _initNodeFsOverlay()._open(fsType,src,name,fsOpts);
+        // _openFsCurrent handles single image, before/after comparer, and batch nav.
+        _openFsCurrent();
       };
       document.addEventListener("keydown",_fKeyHandler);
 
@@ -9954,6 +10944,36 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         genBtn.click();
       });
 
+      // ── Arrow Left/Right → step through a batch result (any mode) ─────────
+      // Single CAPTURE-phase handler so we grab the arrow keys BEFORE ComfyUI's own
+      // graph navigation (which otherwise moves the node selection along the wires to a
+      // connected prompt-input or image-output node). stopImmediatePropagation keeps the
+      // event from reaching ComfyUI at all. Covers both the node fullscreen overlay and
+      // the in-UI preview; in fullscreen the mouse-over-node check is skipped (it is modal).
+      document.addEventListener("keydown",(e)=>{
+        if(e.key!=="ArrowLeft"&&e.key!=="ArrowRight") return;
+        if(_batchImgs.length<2) return;                 // only when a batch is showing
+        const fsOpen=!!(_nodeFsOv&&_nodeFsOv.style.display!=="none");
+        const dir=e.key==="ArrowRight"?1:-1;
+        if(fsOpen){
+          e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
+          if(_nodeFsOv._navHook) _nodeFsOv._navHook(dir);
+          return;
+        }
+        // In-UI batch nav: only when the mouse is over this node, no overlay/text field open.
+        if(!_mouseOverRoot) return;
+        const tag=(document.activeElement||{}).tagName||"";
+        if(tag==="INPUT"||tag==="TEXTAREA") return;
+        if(settingsOverlay.style.display!=="none") return;
+        if(galleryOverlay.style.display!=="none") return;
+        if(_promptOverlay.style.display!=="none") return;
+        if(_inspireOverlay.style.display!=="none") return;
+        if(_sketchOv.style.display!=="none") return;
+        if(_maskOv.style.display!=="none") return;
+        e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
+        _batchShow(_batchIdx+dir);
+      },true); // capture — must run before ComfyUI's graph navigation
+
       // (fullscreen Esc guard is applied per-handler below)
 
       // ── Escape → close Get Inspired overlay ──────────────────────────────
@@ -9994,7 +11014,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       // ── Paste image from clipboard (Ctrl+V) ──────────────────────────────────
       document.addEventListener("paste",async(e)=>{
         const _sketchOpen=_sketchOv&&_sketchOv.style.display!=="none";
-        if(!_mouseOverRoot&&!_sketchOpen) return;
+        const _maskOpen=_maskOv&&_maskOv.style.display!=="none";
+        if(!_mouseOverRoot&&!_sketchOpen&&!_maskOpen) return;
         const tag=(document.activeElement||{}).tagName||"";
         if(tag==="INPUT"||tag==="TEXTAREA") return;
         const items=[...(e.clipboardData?.items||[])];
@@ -10015,6 +11036,13 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         // If the Sketch canvas is open, paste the image as a new layer instead.
         if(_sketchOv&&_sketchOv.style.display!=="none"){
           _sketchAddImageLayer(file);
+          return;
+        }
+        // If the mask (inpaint/outpaint) editor is open: inpaint pastes into the reference
+        // slot (the main image is already loaded, so a paste can only mean the reference);
+        // outpaint has no image target, so ignore paste there.
+        if(_maskOpen){
+          if(_maskMode==="inpaint"&&_refSlot) _refSlot.loadFile(file);
           return;
         }
         // Pick target slot based on active pill and slot state
@@ -10108,34 +11136,51 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         })
         .catch(e=>console.warn("[FluxKlein] models:",e));
       _loadModels();
-      if(S.extLoaders){
-        _applyExtLoaders(true);
-      } else {
-        // Toggle is off, but a GGUF wire may have been kept connected (and restored
-        // by litegraph from the saved workflow). Resize the node to fit any such slots.
-        const _n=app.graph.getNodeById(self.id)||self;
-        if(_n){
-          const _keep=(_n.inputs||[]).filter(i=>_extInputNames.includes(i.name)).length;
-          if(_keep>0){ _n.size=[NODE_W, NODE_H+_keep*_slotH]; _n.setDirtyCanvas(true,true); }
+      // IMPORTANT: this runs from onNodeCreated, which fires BEFORE LiteGraph restores
+      // the node's saved inputs/links on a page reload. If we add the ext-loader slots
+      // synchronously here, they collide with the slots LiteGraph is about to restore,
+      // and the GGUF wire can end up detached — so at generation time _extSlot() sees no
+      // link and silently falls back to the dropdown model (the bug reported on reload).
+      // Defer to the next frame so the graph is fully configured first, then sync.
+      const _initExtLoaders=()=>{
+        if(S.extLoaders){
+          _applyExtLoaders(true);   // adds only missing slots; keeps restored ones + links
+        } else {
+          // Toggle off, but a GGUF wire may have been kept connected (restored by
+          // LiteGraph from the saved workflow). Resize to fit whatever slots exist.
+          _fkResizeToFit();
         }
-      }
-      _refreshExtInputUI();
+        _refreshExtInputUI();
+      };
+      requestAnimationFrame(_initExtLoaders);
 
-      // Auto-refresh Settings dropdowns when connections change
-      self.onConnectionsChange=function(){ _refreshExtInputUI(); };
+      // Auto-refresh Settings dropdowns when connections change. Also re-evaluate the gallery
+      // lightbox's "Set as output" button live if the lightbox is open, so wiring/unwiring the
+      // node's image output enables/disables it immediately (no reopen needed).
+      self.onConnectionsChange=function(){
+        _refreshExtInputUI();
+        if(lightbox.style.display!=="none") _lbRefreshSetOut();
+      };
 
 
 
-      const _slotHInit=(self.inputs||[]).length*(LiteGraph.NODE_SLOT_HEIGHT||20);
+      // computeSize must match setSize/onResize exactly: NODE_H for the UI plus the
+      // slot rows LiteGraph stacks (whichever side — inputs or outputs — has more).
+      // The bug was that this only counted inputs, so the always-present prompt input
+      // and the image output weren't accounted for and the UI overflowed the bottom.
       this.addDOMWidget("fk_ui","div",root,{
         getValue(){return null;},setValue(){},serialize:false,
-        // canvasOnly: keep this huge UI widget on the graph canvas ONLY. Without it the
-        // new ComfyUI "Parameters" side panel tries to render the same DOM element too,
-        // which steals it from the graph and collapses the whole right side of the UI.
-        canvasOnly:true,
-        computeSize(){const slotH=(LiteGraph.NODE_SLOT_HEIGHT||20);const n=(self.inputs||[]).length;return[NODE_W,NODE_H+n*slotH];},
+        // canvasOnly (classic mode only): keeps this huge UI widget on the graph canvas so the
+        // Parameters side-panel can't steal it (collapsing-right-panel bug). In Nodes 2.0 the
+        // Vue renderer skips canvasOnly widgets → blank node, so we must NOT set it there.
+        canvasOnly:!_isVueNodes(),
+        computeSize(){
+          const slotH=(LiteGraph.NODE_SLOT_HEIGHT||20);
+          const rows=Math.max((self.inputs||[]).length,(self.outputs||[]).length);
+          return [NODE_W,NODE_H+rows*slotH];
+        },
       });
-      this.setSize([NODE_W,NODE_H+_slotHInit]);
+      _fkResizeToFit(this);
 
       // Nodes 2.0: hide the auto-injected node-type name badge rendered in the node footer.
       // The badge has class "bg-node-component-surface" (Tailwind) and contains the node type string.
@@ -10159,13 +11204,46 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         }
       });
 
+      // triggerGenerate: a chain poke clicks Generate, which reads the wired prompt input
+      // fresh. Guarded so a poke is ignored while already generating (no double runs).
+      // Defined BEFORE the cache object below, which stores it for the cached-branch
+      // re-registration on workflow switch (const → temporal dead zone if referenced earlier).
+      const _fkTriggerGenerate=()=>{ if(!S.generating) genBtn.click(); };
+
       if(!window.__fluxklein_nodes) window.__fluxklein_nodes={};
       window.__fluxklein_nodes[this.id]={
-        root,S,
-        fns:{showFinal,showPreview,resetBtn,setStage,showError,clearError,poseSkeleton,getPromptId:()=>_activePromptId},
+        root,S,currentNode:this, // currentNode is repointed on workflow-switch reuse; _liveId() reads it
+        fns:{showFinal,showFinalBatch,showTemp,showPreview,resetBtn,setStage,showError,clearError,poseSkeleton,autoSend,getPromptId:()=>_activePromptId,triggerGenerate:_fkTriggerGenerate},
       };
+      _curCacheKey=this.id;
+
+      // Track this node instance (cleaned up in onRemoved).
+      _fkNodes[this.id]={};
+
+      // Register in the One Node family bus so an upstream One Node (e.g. Gemma) can
+      // chain-trigger this node's generation.
+      // NOTE: onNodeCreated runs while the node still has the placeholder id -1; LiteGraph
+      // assigns the real graph id a moment later. Register on the next frame so we key by
+      // the real id (otherwise a chain poke can't find this node — the bug seen here).
+      let _fkFamilyId=null;
+      let _fkFamilyApi=null;
+      const _fkRegisterFamily=()=>{
+        const id=self.id;
+        if(_fkFamilyId!=null && _fkFamilyId!==id) _oneNodeUnregister(_fkFamilyId,_fkFamilyApi); // drop stale -1 key (only if still ours)
+        _fkFamilyId=id;
+        _fkFamilyApi={ kind:"flux", triggerGenerate:_fkTriggerGenerate };
+        _oneNodeRegister(id,_fkFamilyApi);
+      };
+      _fkRegisterFamily();
+      requestAnimationFrame(_fkRegisterFamily);
+      // Expose for onRemoved so it can unregister only if this exact instance still owns the id.
+      this._fkFamilyApiRef=()=>_fkFamilyApi;
+
       _activeS=S;
       _activeShowFinal=showFinal;
+      _activeShowFinalBatch=showFinalBatch;
+      _activeShowTemp=showTemp;
+      _activeAutoSend=autoSend;
       _activeShowPreview=showPreview;
       _activeResetBtn=resetBtn;
       _activeSetStage=setStage;

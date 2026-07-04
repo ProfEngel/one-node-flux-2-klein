@@ -628,6 +628,59 @@ async def save_meta(request):
         return web.json_response({"ok": False, "error": str(e)})
 
 
+@PromptServer.instance.routes.post("/flux_klein/save_temp")
+async def save_temp(request):
+    """Move a temp (PreviewImage) result into the gallery output folder and write
+    its metadata. Used when auto-save is off and the user clicks Save on a result."""
+    try:
+        data = await request.json()
+        temp_filename = data.get("filename", "")
+        temp_subfolder = data.get("subfolder", "")
+        meta = data.get("meta", {})
+        if not temp_filename:
+            return web.json_response({"ok": False, "error": "no filename"})
+
+        # Resolve the source temp file safely inside the temp directory.
+        temp_base = Path(folder_paths.get_temp_directory()).resolve()
+        src = (temp_base / temp_subfolder / temp_filename).resolve()
+        try:
+            src.relative_to(temp_base)
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid temp path"}, status=400)
+        if not src.exists():
+            return web.json_response({"ok": False, "error": f"temp not found: {temp_filename}"})
+
+        # Destination: output/one-node-flux-2-klein/<unique f2k name>.png
+        output_dir = _get_output_dir()
+        dest_dir = os.path.join(output_dir, SUBFOLDER)
+        os.makedirs(dest_dir, exist_ok=True)
+        # Build a unique f2k_NNNNN_.png name so it matches the SaveImage convention.
+        idx = 1
+        existing = glob.glob(os.path.join(dest_dir, "f2k_*_.png"))
+        for f in existing:
+            m = os.path.basename(f)
+            try:
+                n = int(m.split("_")[1])
+                if n >= idx:
+                    idx = n + 1
+            except Exception:
+                pass
+        dest_name = f"f2k_{idx:05d}_.png"
+        dest_path = os.path.join(dest_dir, dest_name)
+        while os.path.exists(dest_path):
+            idx += 1
+            dest_name = f"f2k_{idx:05d}_.png"
+            dest_path = os.path.join(dest_dir, dest_name)
+
+        shutil.copy2(str(src), dest_path)
+        if meta:
+            _write_json_meta(dest_path, meta)
+        return web.json_response({"ok": True, "filename": dest_name, "subfolder": SUBFOLDER})
+    except Exception as e:
+        print(f"[FluxKlein] save_temp error: {e}")
+        return web.json_response({"ok": False, "error": str(e)})
+
+
 @PromptServer.instance.routes.post("/flux_klein/update_meta")
 async def update_meta(request):
     try:
@@ -901,17 +954,105 @@ async def lora_triggers(request):
     return web.json_response({"ok": False, "error": "file not found", "triggers": []})
 
 
+# Stores the currently-shown output image per node instance (keyed by the node's
+# graph id). JS posts here after every generation and whenever the user clicks
+# through a batch, so noop() can hand the visible image to downstream nodes on the
+# next graph run. Value: {"filename","subfolder","type"} or None.
+_last_output_by_node = {}
+
+
+def _resolve_image_file(filename, subfolder="", ftype="output"):
+    """Safely resolve a generated image to an absolute path. Handles the output
+    folder and ComfyUI's temp folder (used for unsaved auto-save-off results)."""
+    if not filename:
+        return None
+    if ftype == "temp":
+        base = Path(folder_paths.get_temp_directory()).resolve()
+    elif ftype == "input":
+        base = Path(folder_paths.get_input_directory()).resolve()
+    else:
+        base = Path(_get_output_dir()).resolve()
+    target = base
+    if subfolder:
+        target = target / subfolder
+    target = (target / filename).resolve()
+    try:
+        target.relative_to(base)  # path-traversal guard
+    except Exception:
+        return None
+    return str(target) if os.path.isfile(target) else None
+
+
+@PromptServer.instance.routes.post("/flux_klein/set_output")
+async def set_output(request):
+    try:
+        data = await request.json()
+        node_id = str(data.get("node_id", ""))
+        if not node_id:
+            return web.json_response({"ok": False, "error": "no node_id"}, status=400)
+        fn = data.get("filename")
+        if fn:
+            _last_output_by_node[node_id] = {
+                "filename": fn,
+                "subfolder": data.get("subfolder", "") or "",
+                "type": data.get("type", "output") or "output",
+            }
+        else:
+            _last_output_by_node.pop(node_id, None)
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+def _empty_image_tensor():
+    import torch
+    return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+
+def _load_image_tensor(info):
+    """Load a stored output image into a ComfyUI IMAGE tensor [1,H,W,3] float32."""
+    try:
+        import torch
+        import numpy as np
+        from PIL import Image, ImageOps
+    except Exception:
+        return _empty_image_tensor()
+    if not info:
+        return _empty_image_tensor()
+    path = _resolve_image_file(info.get("filename", ""), info.get("subfolder", ""), info.get("type", "output"))
+    if not path:
+        return _empty_image_tensor()
+    try:
+        img = Image.open(path)
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("RGB")
+        arr = np.array(img).astype(np.float32) / 255.0
+        return torch.from_numpy(arr)[None, ]
+    except Exception:
+        return _empty_image_tensor()
+
+
 class FluxKleinOneNode:
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {}, "hidden": {"unique_id": "UNIQUE_ID"}}
-    RETURN_TYPES = ()
+        # `prompt` is an optional STRING input; when connected, JS reads its value at
+        # generate time and uses it in place of the prompt box (per mode).
+        return {
+            "required": {},
+            "optional": {"prompt": ("STRING", {"forceInput": True})},
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "noop"
     CATEGORY = "One Node"
     OUTPUT_NODE = True
 
-    def noop(self, **kwargs):
-        return {}
+    def noop(self, unique_id=None, **kwargs):
+        # Return the image currently shown in this node's preview (set by JS via
+        # POST /flux_klein/set_output after each generation / batch step).
+        info = _last_output_by_node.get(str(unique_id))
+        return {"result": (_load_image_tensor(info),)}
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):

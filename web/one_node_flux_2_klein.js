@@ -8911,8 +8911,38 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         else if(_isOutpaintSnap) _snapMode="outpaint";
         else if(_isFaceswapSnap) _snapMode="faceswap";
         else _snapMode=activePill;
+        // Read the prompt-input node's text (if wired) so the SAVED metadata matches the prompt
+        // that actually generated the image — not the (possibly different) prompt box. Defined
+        // here (before _pendingMeta) and reused below for the workflow patch.
+        const _readPromptInputText=()=>{
+          const node=app.graph.getNodeById(_liveId());
+          if(!node) return null;
+          const slot=(node.inputs||[]).find(i=>i.name==="prompt");
+          if(!slot||slot.link==null) return null;
+          const link=app.graph.links[slot.link];
+          if(!link) return null;
+          const src=app.graph.getNodeById(link.origin_id);
+          if(!src) return null;
+          // Bypassed (mode 4) or muted (mode 2) upstream node: treat it as if it weren't
+          // connected at all, so the prompt falls back to our own prompt box. Otherwise the
+          // node would keep feeding its text even though the user explicitly bypassed it.
+          if(src.mode===2||src.mode===4) return null;
+          // "One Node" siblings (e.g. Gemma 4) are no-op nodes whose text lives in their
+          // own UI state, not a widget. Read their last generated output directly.
+          if(src._g4_S && typeof src._g4_S.lastOutput==="string") return src._g4_S.lastOutput;
+          if(src._fk_S && typeof src._fk_S.prompt==="string") return src._fk_S.prompt;
+          // Standard text nodes: prefer a widget literally named text/string/value/prompt,
+          // else the first string-valued widget on the node.
+          const ws=src.widgets||[];
+          const named=ws.find(w=>/^(text|string|value|prompt)$/i.test(w.name||"")&&typeof w.value==="string");
+          if(named) return named.value;
+          const anyStr=ws.find(w=>typeof w.value==="string");
+          return anyStr?anyStr.value:null;
+        };
+        const _promptInputText=_readPromptInputText();
+        const _basePrompt=(_promptInputText!=null)?_promptInputText:(S.prompt||"");
         S._pendingMeta={
-          prompt:S.prompt,
+          prompt:_basePrompt,
           w:getEffectiveW(), h:getEffectiveH(),
           mode:_snapMode,
           image1:activePill==="i2i"?(S.i2iImage||null):(_isPaintSnap?(_paintSlot.name||null):(_isFaceswapSnap?(S.fsTarget||null):(activePill==="pose"?(S.poseRef||null):(activePill==="edit"?(S.image1Name||null):null)))),
@@ -9035,42 +9065,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
           }
         };
 
-        // ── Prompt text input ───────────────────────────────────────────────
-        // The node has an always-present optional STRING "prompt" input. When wired to
-        // a text source, its value REPLACES the prompt box for this run (per the user's
-        // choice). We read the upstream node's static text value so LoRA trigger words
-        // and the POSE trigger are still combined in JS exactly as with the box.
-        // Works for simple text sources (Primitive / Text / String / CLIP Text Encode);
-        // if the upstream value can't be read statically we fall back to the box.
-        const _readPromptInputText=()=>{
-          const node=app.graph.getNodeById(_liveId());
-          if(!node) return null;
-          const slot=(node.inputs||[]).find(i=>i.name==="prompt");
-          if(!slot||slot.link==null) return null;
-          const link=app.graph.links[slot.link];
-          if(!link) return null;
-          const src=app.graph.getNodeById(link.origin_id);
-          if(!src) return null;
-          // Bypassed (mode 4) or muted (mode 2) upstream node: treat it as if it weren't
-          // connected at all, so the prompt falls back to our own prompt box. Otherwise the
-          // node would keep feeding its text even though the user explicitly bypassed it.
-          if(src.mode===2||src.mode===4) return null;
-          // "One Node" siblings (e.g. Gemma 4) are no-op nodes whose text lives in their
-          // own UI state, not a widget. Read their last generated output directly.
-          if(src._g4_S && typeof src._g4_S.lastOutput==="string") return src._g4_S.lastOutput;
-          if(src._fk_S && typeof src._fk_S.prompt==="string") return src._fk_S.prompt;
-          // Standard text nodes: prefer a widget literally named text/string/value/prompt,
-          // else the first string-valued widget on the node.
-          const ws=src.widgets||[];
-          const named=ws.find(w=>/^(text|string|value|prompt)$/i.test(w.name||"")&&typeof w.value==="string");
-          if(named) return named.value;
-          const anyStr=ws.find(w=>typeof w.value==="string");
-          return anyStr?anyStr.value:null;
-        };
-        const _promptInputText=_readPromptInputText();
-        const _basePrompt=(_promptInputText!=null)?_promptInputText:(S.prompt||"");
-
-        // Build effective prompt — trigger words from all active LoRAs prepended
+        // Prompt text input + LoRA/POSE triggers were resolved above (into _basePrompt) so the
+        // saved metadata matches the generating prompt. Build the effective workflow prompt here.
         const _effectivePrompt=await _buildPromptWithTriggers(_basePrompt);
 
         const useKV=(S.model||"").toLowerCase().includes("kv");

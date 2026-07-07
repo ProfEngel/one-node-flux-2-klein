@@ -17,6 +17,8 @@ A ComfyUI custom node that wraps the full FLUX.2 [klein] workflow into a single 
 
 ▶ [Watch on YouTube](https://youtu.be/L4ItbBWXqCo)
 
+▶ [See the latest update](https://youtu.be/Vsp1tDFipHE)
+
 The node has been updated since the tutorial was recorded - check the [Changelog](#changelog) for new features.
 
 ---

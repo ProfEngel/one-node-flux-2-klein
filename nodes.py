@@ -87,6 +87,11 @@ LLM_MODE_INSTRUCTIONS = {
         "Turn the user's notes or draft into complete, singable lyrics. Preserve the requested language, topic, perspective, names, "
         "and phrases. Use clear section markers such as [Verse], [Chorus], [Bridge], and [Outro] where appropriate."
     ),
+    "song_all": (
+        "Create one coherent, production-ready ACE-Step song specification from the user's notes and current settings. Improve the "
+        "music description and lyrics together, and choose suitable duration, BPM, language, key, time signature, and seed. Preserve "
+        "every explicit request. Lyrics must be singable and use clear section markers where appropriate."
+    ),
 }
 
 LLM_PROMPT_SCHEMA = {
@@ -150,6 +155,22 @@ LLM_SONG_LYRICS_SCHEMA = {
     "type": "object",
     "properties": {"lyrics": {"type": "string"}},
     "required": ["lyrics"],
+    "additionalProperties": False,
+}
+
+LLM_SONG_ALL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "music_description": {"type": "string"},
+        "lyrics": {"type": "string"},
+        "duration_seconds": {"type": "number", "minimum": 1, "maximum": 1000},
+        "bpm": {"type": "integer", "minimum": 10, "maximum": 300},
+        "language": {"type": "string"},
+        "key": {"type": "string"},
+        "time_signature": {"type": "string", "enum": ["2", "3", "4", "6"]},
+        "seed": {"type": "integer", "minimum": 0, "maximum": 999999999999999},
+    },
+    "required": ["music_description", "lyrics", "duration_seconds", "bpm", "language", "key", "time_signature", "seed"],
     "additionalProperties": False,
 }
 
@@ -789,11 +810,13 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
     operation = str(operation or "").strip().lower()
     effective_mode = operation if mode == "inpaint" and operation in {"inpaint", "outpaint"} else mode
     mode_instruction = LLM_MODE_INSTRUCTIONS.get(effective_mode, LLM_MODE_INSTRUCTIONS["t2i"])
-    song_mode = effective_mode in {"song_description", "song_lyrics"}
+    song_mode = effective_mode in {"song_description", "song_lyrics", "song_all"}
     if effective_mode == "song_description":
         response_schema = LLM_SONG_DESCRIPTION_SCHEMA
     elif effective_mode == "song_lyrics":
         response_schema = LLM_SONG_LYRICS_SCHEMA
+    elif effective_mode == "song_all":
+        response_schema = LLM_SONG_ALL_SCHEMA
     elif effective_mode in {"t2v", "i2v"}:
         response_schema = LLM_VIDEO_PROMPT_SCHEMA
     else:
@@ -873,7 +896,7 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
             repaired = _llm_content(repaired_response)
         data = _llm_parse_json(repaired)
 
-    if effective_mode not in {"t2v", "i2v", "song_description", "song_lyrics"}:
+    if effective_mode not in {"t2v", "i2v", "song_description", "song_lyrics", "song_all"}:
         data = _llm_enrich_json(data, width, height)
     return {
         "json_prompt": json.dumps(data, ensure_ascii=False, indent=2),

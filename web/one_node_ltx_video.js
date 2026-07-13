@@ -153,6 +153,26 @@ function initMediaUI(root) {
     height: "34px", border: "0", borderRadius: "6px", background: LIME, color: "#111",
     fontSize: "12px", fontWeight: "800", cursor: "pointer", padding: "0 16px",
   }), label);
+  const switchControl = (label, title) => {
+    const button = el("button", {
+      display: "flex", alignItems: "center", gap: "5px", border: `1px solid ${BORDER}`,
+      borderRadius: "5px", background: "#171717", color: "#888", padding: "3px 7px",
+      fontSize: "9px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap",
+    }, { title, type: "button" });
+    const caption = tx(el("span"), label);
+    const track = el("span", { position: "relative", width: "24px", height: "12px", borderRadius: "7px", background: "#333", transition: "background .18s" });
+    const thumb = el("span", { position: "absolute", top: "2px", left: "2px", width: "8px", height: "8px", borderRadius: "50%", background: "#888", transition: "left .18s, background .18s" });
+    track.append(thumb); button.append(caption, track);
+    button.setOn = on => {
+      button.dataset.on = on ? "1" : "0";
+      button.style.borderColor = on ? "rgba(240,255,65,.55)" : BORDER;
+      caption.style.color = on ? LIME : "#888";
+      track.style.background = on ? LIME : "#333";
+      thumb.style.left = on ? "14px" : "2px";
+      thumb.style.background = on ? "#111" : "#888";
+    };
+    return button;
+  };
   const textarea = (value, placeholder, minHeight = "100px") => el("textarea", {
     width: "100%", minHeight, resize: "none", border: `1px solid ${BORDER}`, borderRadius: "6px",
     background: "#171717", color: "#dedede", padding: "9px 10px", boxSizing: "border-box",
@@ -195,6 +215,7 @@ function initMediaUI(root) {
   const panels = {};
   const settingsButton = smallButton("Models");
   const helpButton = smallButton("Help");
+  const videoUnloadToggle = switchControl("Unload", "Unload all ComfyUI models and free GPU memory after generation");
 
   // Video panel
   const videoPanel = el("div", { display: "none", gridTemplateColumns: "390px minmax(0,1fr)", gap: "12px", height: "100%" });
@@ -202,7 +223,7 @@ function initMediaUI(root) {
   const reviewButton = smallButton("Review JSON");
   const videoHeaderLabel = tx(el("div", { color: LIME, fontWeight: "800", fontSize: "11px" }), "LTX 2.3 - T2V");
   const videoHeader = el("div", { display: "flex", alignItems: "center", gap: "6px", minHeight: "24px" });
-  videoHeader.append(videoHeaderLabel, el("div", { flex: "1" }), helpButton, settingsButton, reviewButton);
+  videoHeader.append(videoHeaderLabel, el("div", { flex: "1" }), videoUnloadToggle, helpButton, settingsButton, reviewButton);
   const promptHeader = el("div", { display: "flex", alignItems: "center", gap: "7px" });
   promptHeader.append(tx(el("span", { fontSize: "9px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Prompt"));
   const enhanceToggle = smallButton("Enhance off");
@@ -248,7 +269,8 @@ function initMediaUI(root) {
   const voiceControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflowY: "auto", paddingRight: "3px" });
   const voiceModelsButton = smallButton("Models");
   const voiceHelpButton = smallButton("Help");
-  voiceControls.append(panelHeader("Qwen3 TTS - CloneVoice", [voiceHelpButton, voiceModelsButton]));
+  const voiceUnloadToggle = switchControl("Unload", "Unload all ComfyUI models and free GPU memory after generation");
+  voiceControls.append(panelHeader("Qwen3 TTS - CloneVoice", [voiceUnloadToggle, voiceHelpButton, voiceModelsButton]));
   const voiceText = textarea(state.voice.text, "Text to speak with the cloned voice...", "105px");
   const voiceRefText = textarea(state.voice.refText, "Exact transcript of the reference audio...", "72px");
   const voiceTemplateRow = el("div", { display: "grid", gridTemplateColumns: "minmax(100px,1fr) minmax(90px,1fr) auto auto", gap: "5px", alignItems: "end" });
@@ -280,7 +302,9 @@ function initMediaUI(root) {
   const songPanel = el("div", { display: "none", gridTemplateColumns: "430px minmax(0,1fr)", gap: "12px", height: "100%" });
   const songControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflowY: "auto", paddingRight: "3px" });
   const songModelsButton = smallButton("Models"); const songHelpButton = smallButton("Help");
-  songControls.append(panelHeader("ACE-Step 1.5 - Song", [songHelpButton, songModelsButton]));
+  const songEnhanceAllButton = smallButton("Enhance all");
+  const songUnloadToggle = switchControl("Unload", "Unload all ComfyUI models and free GPU memory after generation");
+  songControls.append(panelHeader("ACE-Step 1.5 - Song", [songEnhanceAllButton, songUnloadToggle, songHelpButton, songModelsButton]));
   const songTags = textarea(state.song.tags, "Style, genre, instruments, mood, vocals...", "62px");
   const songLyrics = textarea(state.song.lyrics, "Lyrics with optional [Verse], [Chorus] and [Bridge] sections...", "105px");
   const songTagsHeader = el("div", { display: "flex", alignItems: "center", gap: "6px" });
@@ -378,6 +402,20 @@ function initMediaUI(root) {
   helpOverlay.append(helpHead, helpBody); overlay.append(helpOverlay);
 
   const setStatus = (node, message, error = false) => { node.textContent = message; node.style.color = error ? "#ff6b6b" : "#888"; };
+  const unloadToggles = [videoUnloadToggle, voiceUnloadToggle, songUnloadToggle];
+  const refreshUnloadToggles = () => {
+    const enabled = !!sharedState().unloadAfterGeneration;
+    for (const toggle of unloadToggles) toggle.setOn(enabled);
+  };
+  const setGlobalUnload = enabled => {
+    const shared = sharedState();
+    shared.unloadAfterGeneration = !!enabled;
+    localStorage.setItem(IMAGE_STATE_KEY, JSON.stringify(shared));
+    window.dispatchEvent(new CustomEvent("one-node:unload-setting-changed", { detail: { enabled: !!enabled } }));
+    refreshUnloadToggles();
+  };
+  for (const toggle of unloadToggles) toggle.onclick = () => setGlobalUnload(toggle.dataset.on !== "1");
+  window.addEventListener("one-node:unload-setting-changed", refreshUnloadToggles);
   let voiceTemplates = [];
   const renderVoiceTemplates = (selectedName = voiceTemplateSelectField.input.value) => {
     voiceTemplateSelectField.input.replaceChildren(tx(el("option", {}, { value: "" }), "Choose template..."));
@@ -415,6 +453,8 @@ function initMediaUI(root) {
       const selected = active && state.mode === mode;
       pill.style.background = selected ? LIME : "#202020";
       pill.style.color = selected ? "#111" : "#bbb";
+      pill.style.borderColor = selected ? LIME : BORDER;
+      pill.style.fontWeight = selected ? "700" : "400";
     }
     const videoMode = state.mode === "t2v" || state.mode === "i2v";
     videoPanel.style.display = videoMode ? "grid" : "none";
@@ -433,11 +473,15 @@ function initMediaUI(root) {
       widthField.input.value = state.width[state.mode]; heightField.input.value = state.height[state.mode];
     }
     refAudioFile.caption.textContent = state.voice.refAudioLabel || state.voice.refAudioName || "Reference voice audio";
+    refreshUnloadToggles();
     placeOverlay();
   };
   const openMode = mode => {
     state.mode = mode; overlay.style.display = "block"; settingsOverlay.style.display = "none"; helpOverlay.style.display = "none";
-    for (const button of imagePills) { button.style.background = "#202020"; button.style.color = "#bbb"; }
+    for (const button of imagePills) {
+      button.style.background = "#202020"; button.style.color = "#bbb";
+      button.style.borderColor = BORDER; button.style.fontWeight = "400";
+    }
     jsonPanel.style.display = "none"; promptTA.style.display = "block"; promptTA.value = state.prompt || "";
     persist(); refresh();
   };
@@ -507,6 +551,14 @@ function initMediaUI(root) {
     promptTA.value = value; jsonPanel.style.display = "none"; promptTA.style.display = "block"; persist(); refresh();
   };
 
+  const readSongContext = () => ({
+    duration_seconds: clampFloat(songDuration.input.value, 1, 1000, 180),
+    bpm: clampInt(songBpm.input.value, 10, 300, 120),
+    language: songLanguage.input.value.trim() || "de",
+    key: songKey.input.value.trim() || "E minor",
+    time_signature: songTime.input.value,
+    seed: clampInt(songSeed.input.value, 0, 999999999999999, 0),
+  });
   const enhanceSongField = async (mode, input, button) => {
     const prompt = input.value.trim();
     if (!prompt) { setStatus(songStatus, mode === "song_lyrics" ? "Enter lyrics or lyric ideas first" : "Enter a music description first", true); return; }
@@ -519,13 +571,7 @@ function initMediaUI(root) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt, mode, width: 1024, height: 1024, settings: llmSettingsPayload(),
-          context: {
-            duration_seconds: clampFloat(songDuration.input.value, 1, 1000, 180),
-            bpm: clampInt(songBpm.input.value, 10, 300, 120),
-            language: songLanguage.input.value.trim() || "de",
-            key: songKey.input.value.trim() || "E minor",
-            time_signature: songTime.input.value,
-          },
+          context: readSongContext(),
         }),
       });
       const result = await response.json();
@@ -541,6 +587,44 @@ function initMediaUI(root) {
   };
   songTagsEnhance.onclick = () => enhanceSongField("song_description", songTags, songTagsEnhance);
   songLyricsEnhance.onclick = () => enhanceSongField("song_lyrics", songLyrics, songLyricsEnhance);
+  songEnhanceAllButton.onclick = async () => {
+    const description = songTags.value.trim();
+    const lyrics = songLyrics.value.trim();
+    if (!description && !lyrics) { setStatus(songStatus, "Enter a music idea or lyric idea first", true); return; }
+    if (songEnhanceAllButton.disabled) return;
+    const originalLabel = songEnhanceAllButton.textContent;
+    songEnhanceAllButton.disabled = true; songEnhanceAllButton.style.opacity = ".55"; songEnhanceAllButton.textContent = "Enhancing...";
+    try {
+      setStatus(songStatus, "Enhancing the complete song specification with LM Studio...");
+      const response = await api.fetchApi("/flux_klein/enhance_prompt", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: `MUSIC DESCRIPTION NOTES:\n${description || "(not provided)"}\n\nLYRIC NOTES OR DRAFT:\n${lyrics || "(not provided)"}`,
+          mode: "song_all", width: 1024, height: 1024, settings: llmSettingsPayload(), context: readSongContext(),
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok || !result.json_prompt) throw new Error(result.error || `Enhance HTTP ${response.status}`);
+      const enhanced = JSON.parse(result.json_prompt);
+      songTags.value = String(enhanced.music_description || "").trim();
+      songLyrics.value = String(enhanced.lyrics || "").trim();
+      if (!songTags.value || !songLyrics.value) throw new Error("LM Studio returned an incomplete song specification");
+      songDuration.input.value = String(clampFloat(enhanced.duration_seconds, 1, 1000, 180));
+      songBpm.input.value = String(clampInt(enhanced.bpm, 10, 300, 120));
+      songLanguage.input.value = String(enhanced.language || "de").trim();
+      songKey.input.value = String(enhanced.key || "E minor").trim();
+      songTime.input.value = ["2", "3", "4", "6"].includes(String(enhanced.time_signature)) ? String(enhanced.time_signature) : "4";
+      songSeed.input.value = String(clampInt(enhanced.seed, 0, 999999999999999, 0));
+      Object.assign(state.song, {
+        tags: songTags.value, lyrics: songLyrics.value,
+        duration: Number(songDuration.input.value), bpm: Number(songBpm.input.value),
+        language: songLanguage.input.value, keyscale: songKey.input.value,
+        timesignature: songTime.input.value, seed: Number(songSeed.input.value),
+      });
+      persist(); setStatus(songStatus, "All song parameters enhanced - review or edit them, then generate");
+    } catch (error) { setStatus(songStatus, error?.message || String(error), true); }
+    finally { songEnhanceAllButton.disabled = false; songEnhanceAllButton.style.opacity = "1"; songEnhanceAllButton.textContent = originalLabel; }
+  };
 
   const upload = async file => {
     const form = new FormData(); form.append("image", file, file.name); form.append("type", "input"); form.append("overwrite", "true");

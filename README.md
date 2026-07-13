@@ -157,7 +157,7 @@ Every generated voice is saved as MP3, previewed in OneNode, copied into ComfyUI
 
 Song uses ComfyUI's ACE-Step 1.5 nodes. It provides separate fields for music description and lyrics, plus duration, BPM, language, key, time signature, and seed. The default model files are:
 
-Music description and lyrics each have their own **Enhance** action. Enter keywords or a rough draft, run the desired enhancement through the configured local LLM, and review or edit the returned text directly in the same field. **Generate song** is a separate action and never starts automatically after enhancement.
+Music description and lyrics each have their own **Enhance** action. **Enhance all** improves the complete song specification in one coherent pass, including music description, lyrics, duration, BPM, language, key, time signature, and seed. Enter keywords or a rough draft, run the desired enhancement through the configured local LLM, and review or edit every returned value directly in the form. **Generate song** is a separate action and never starts automatically after enhancement.
 
 - Diffusion model: `acestep_v1.5_xl_turbo_bf16.safetensors`
 - Text encoders: `qwen_0.6b_ace15.safetensors` and `qwen_1.7b_ace15.safetensors`
@@ -166,6 +166,8 @@ Music description and lyrics each have their own **Enhance** action. Enter keywo
 The files are available from [Comfy-Org/ace_step_1.5_ComfyUI_files](https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files). Generated songs are saved as MP3 and can be passed directly to either video mode.
 
 The top-level **Settings** button opens context-specific Media Models while T2V, I2V, CloneVoice, or Song is active. The media Help page and the main Help page list the required filenames and download locations.
+
+Every image and media mode exposes the same global **Unload** switch. When enabled, FLUX, LTX, Qwen3-TTS, or ACE-Step models are unloaded and GPU memory is freed after that mode completes. Changing the switch in any mode immediately changes it everywhere.
 
 ---
 

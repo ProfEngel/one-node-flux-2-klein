@@ -8638,7 +8638,15 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _unloadLbl.style.color=on?LIME:C.muted;
         _unloadWrap.style.borderColor=on?"rgba(240,255,65,.55)":C.border;
       };
-      _unloadWrap.onclick=()=>{S.unloadAfterGeneration=!S.unloadAfterGeneration;_refreshUnloadSwitch();persist();};
+      _unloadWrap.onclick=()=>{
+        S.unloadAfterGeneration=!S.unloadAfterGeneration;_refreshUnloadSwitch();persist();
+        window.dispatchEvent(new CustomEvent("one-node:unload-setting-changed",{detail:{enabled:S.unloadAfterGeneration}}));
+      };
+      window.addEventListener("one-node:unload-setting-changed",event=>{
+        const enabled=!!event.detail?.enabled;
+        if(S.unloadAfterGeneration===enabled) return;
+        S.unloadAfterGeneration=enabled;_refreshUnloadSwitch();persist();
+      });
       _refreshUnloadSwitch();
 
       const _viewEnhancedBtn=mk("button",{

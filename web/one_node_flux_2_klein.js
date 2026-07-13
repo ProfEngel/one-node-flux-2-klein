@@ -1146,7 +1146,7 @@ app.registerExtension({
 
       const pad=mk("div",{padding:"12px",display:"flex",flexDirection:"column",
         gap:"10px",boxSizing:"border-box",width:"100%",
-        height:_uiH+"px"});
+        height:_uiH+"px",position:"relative"});
 
       // ── SETTINGS OVERLAY ──────────────────────────────────────────────────
       const settingsOverlay=mk("div",{
@@ -6922,7 +6922,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         borderRadius:"10px",border:`1px solid ${C.border}`,
         position:"relative",overflow:"hidden",
       });
-      const runtimeMonitor=createRuntimeMonitor(api);
+      const runtimeMonitor=createRuntimeMonitor(api,{compact:true});
 
       // Placeholder
       const placeholder=mk("div",{
@@ -7306,8 +7306,12 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       // inactive" state to confuse the user.
 
       previewBox.append(placeholder,finalImg,comparerWrap,previewUseWrap,previewSaveBtn,previewDelBtn,autoSaveTog,progWrap);
-      rightPanel.append(previewBox,runtimeMonitor.root);
-      runtimeMonitor.root.style.marginTop="7px";
+      rightPanel.appendChild(previewBox);
+      const runtimeFooter=mk("div",{
+        position:"absolute",left:"0",right:"0",bottom:"13px",padding:"0 12px",
+        boxSizing:"border-box",zIndex:"4",pointerEvents:"none",
+      });
+      runtimeFooter.appendChild(runtimeMonitor.root);
 
       mainRow.append(leftPanel,rightPanel);
 
@@ -11085,6 +11089,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       // Layout mode places promptWrap either in the left column ("tall" → preview
       // gets full height, good for portrait) or full-width under the preview ("classic").
       _applyLayout(S.layoutMode);
+      pad.appendChild(runtimeFooter);
       root.appendChild(helpOverlay);
       root.appendChild(settingsOverlay);
       root.appendChild(galleryOverlay);
@@ -11112,7 +11117,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       const _shortcutsEl=mk("span",{color:"#444",letterSpacing:".03em"});
       tx(_shortcutsEl,"D · discover  G · gallery  Space · generate  F · fullscreen");
       const _creditTxt=mk("div",{fontSize:"8px",color:"#555",letterSpacing:".04em",whiteSpace:"nowrap"});
-      tx(_creditTxt,"created by yanokusnir");
+      tx(_creditTxt,"created by yanokusnir · enhanced by ProfEngel");
       _creditEl.style.justifyContent="";
       _creditEl.innerHTML="";
       _creditEl.style.pointerEvents="auto";

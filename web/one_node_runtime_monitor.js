@@ -16,13 +16,14 @@ const formatSeconds = seconds => {
   return `${minutes}m ${Math.ceil(seconds % 60)}s`;
 };
 
-export function createRuntimeMonitor(api) {
+export function createRuntimeMonitor(api, { compact = false } = {}) {
   const root = make("div", {
     display: "flex", flexDirection: "column", gap: "5px", flexShrink: "0",
     padding: "7px 9px", background: "#101010", border: `1px solid ${BORDER}`,
     borderRadius: "6px", boxSizing: "border-box", minWidth: "0",
   });
-  const headline = make("div", { display: "flex", alignItems: "center", gap: "8px", fontSize: "9px" });
+  if (compact) Object.assign(root.style, { gap: "3px", padding: "4px 8px", borderRadius: "5px", background: "rgba(16,16,16,.96)" });
+  const headline = make("div", { display: "flex", alignItems: "center", gap: "8px", fontSize: compact ? "8px" : "9px" });
   const stateLabel = make("span", { color: "#aaa", fontWeight: "700", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
   const timeLabel = make("span", { color: "#777", marginLeft: "auto", whiteSpace: "nowrap" });
   const percentLabel = make("span", { color: LIME, fontWeight: "800", minWidth: "32px", textAlign: "right" });
@@ -32,10 +33,10 @@ export function createRuntimeMonitor(api) {
   const progressFill = make("div", { width: "0%", height: "100%", background: LIME, transition: "width .25s ease" });
   progressTrack.append(progressFill);
 
-  const metrics = make("div", { display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: "7px" });
+  const metrics = make("div", { display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: compact ? "5px" : "7px" });
   const metric = label => {
     const wrap = make("div", { minWidth: "0" });
-    const row = make("div", { display: "flex", gap: "4px", justifyContent: "space-between", fontSize: "8px", color: "#777", marginBottom: "2px" });
+    const row = make("div", { display: "flex", gap: "4px", justifyContent: "space-between", fontSize: compact ? "7px" : "8px", color: "#777", marginBottom: compact ? "1px" : "2px" });
     const name = make("span", { whiteSpace: "nowrap" });
     const value = make("span", { color: "#aaa", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" });
     setText(name, label); setText(value, "--"); row.append(name, value);

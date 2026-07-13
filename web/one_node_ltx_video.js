@@ -1,4 +1,5 @@
 import { api } from "../../scripts/api.js";
+import { createRuntimeMonitor } from "./one_node_runtime_monitor.js";
 
 const MEDIA_STATE_KEY = "one_node_ltx_video_state";
 const IMAGE_STATE_KEY = "one_node_flux_klein_state";
@@ -220,6 +221,11 @@ function initMediaUI(root) {
     return row;
   };
   const mediaUrl = asset => api.apiURL(`/view?filename=${encodeURIComponent(asset.filename)}&type=${encodeURIComponent(asset.type || "output")}&subfolder=${encodeURIComponent(asset.subfolder || "")}`);
+  const inputImageUrl = name => {
+    const parts = String(name || "").replaceAll("\\", "/").split("/").filter(Boolean);
+    const filename = parts.pop() || "";
+    return mediaUrl({ filename, subfolder: parts.join("/"), type: "input" });
+  };
 
   const panels = {};
   const settingsButton = smallButton("Models");
@@ -256,7 +262,11 @@ function initMediaUI(root) {
   const audioFile = fileControl("Optional audio", "audio/*");
   const imageActions = el("div", { display: "flex", gap: "5px", minWidth: "0" });
   const galleryImageButton = smallButton("From Gallery");
-  imageActions.append(imageFile.wrap, galleryImageButton);
+  const imageThumb = el("img", {
+    display: "none", width: "34px", height: "34px", flex: "0 0 34px", objectFit: "cover",
+    border: `1px solid ${BORDER}`, borderRadius: "4px", background: "#090909",
+  }, { alt: "I2V first frame", title: "Selected I2V first frame" });
+  imageActions.append(imageFile.wrap, galleryImageButton, imageThumb);
   imageFile.wrap.style.flex = "1";
   videoAssets.append(imageActions, audioFile.wrap);
   const videoActions = el("div", { display: "flex", gap: "7px" });
@@ -268,7 +278,8 @@ function initMediaUI(root) {
   const videoPreview = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", minHeight: "0" });
   const video = el("video", { width: "100%", flex: "1", minHeight: "0", objectFit: "contain", background: "#050505", border: "1px solid #292929", borderRadius: "6px" }, { controls: true });
   const videoMeta = tx(el("div", { minHeight: "18px", color: "#777", fontSize: "9px", textAlign: "right" }), "Generated video will appear here");
-  videoPreview.append(video, videoMeta);
+  const videoRuntime = createRuntimeMonitor(api);
+  videoPreview.append(video, videoMeta, videoRuntime.root);
   videoControls.append(videoHeader, promptHeader, promptTA, jsonPanel, videoFields, videoAssets, videoActions, videoStatus);
   videoPanel.append(videoControls, videoPreview);
   panels.video = videoPanel;
@@ -303,7 +314,8 @@ function initMediaUI(root) {
   const voiceMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated voice will appear here");
   const voiceSend = el("div", { display: "flex", justifyContent: "center", gap: "7px" });
   const voiceToT2V = smallButton("Use in T2V"); const voiceToI2V = smallButton("Use in I2V");
-  voiceSend.append(voiceToT2V, voiceToI2V); voicePreview.append(voiceAudio, voiceMeta, voiceSend);
+  const voiceRuntime = createRuntimeMonitor(api);
+  voiceSend.append(voiceToT2V, voiceToI2V); voicePreview.append(voiceAudio, voiceMeta, voiceSend, voiceRuntime.root);
   voicePanel.append(voiceControls, voicePreview);
   panels.voice = voicePanel;
 
@@ -338,7 +350,8 @@ function initMediaUI(root) {
   const songMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated song will appear here");
   const songSend = el("div", { display: "flex", justifyContent: "center", gap: "7px" });
   const songToT2V = smallButton("Use in T2V"); const songToI2V = smallButton("Use in I2V");
-  songSend.append(songToT2V, songToI2V); songPreview.append(songAudio, songMeta, songSend);
+  const songRuntime = createRuntimeMonitor(api);
+  songSend.append(songToT2V, songToI2V); songPreview.append(songAudio, songMeta, songSend, songRuntime.root);
   songPanel.append(songControls, songPreview);
   panels.song = songPanel;
 
@@ -475,6 +488,8 @@ function initMediaUI(root) {
       imageActions.style.display = state.mode === "i2v" ? "flex" : "none";
       clearImageButton.style.display = state.mode === "i2v" ? "block" : "none";
       imageFile.caption.textContent = state.imageLabel || state.imageName || "Upload first frame";
+      imageThumb.style.display = state.mode === "i2v" && state.imageName ? "block" : "none";
+      if (state.imageName) imageThumb.src = inputImageUrl(state.imageName);
       audioFile.caption.textContent = state.audioLabel || state.audioName || "Optional audio";
       enhanceToggle.textContent = state.enhance[state.mode] ? "Enhance on" : "Enhance off";
       enhanceToggle.style.color = state.enhance[state.mode] ? LIME : "#aaa";
@@ -673,35 +688,98 @@ function initMediaUI(root) {
     if (missing.length) throw new Error(`Missing ComfyUI nodes: ${missing.join(", ")}`);
   };
   const findAsset = (output, kind) => {
-    const keys = kind === "video" ? ["video", "videos", "gifs"] : ["audio", "audios"];
-    for (const key of keys) {
+    const extensions = kind === "video"
+      ? [".mp4", ".webm", ".mov", ".mkv", ".avi", ".gif"]
+      : [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"];
+    const preferredKeys = kind === "video"
+      ? ["video", "videos", "gifs", "images", "files"]
+      : ["audio", "audios", "files"];
+    const normalize = item => typeof item === "string"
+      ? { filename: item, subfolder: "", type: "output" }
+      : item?.filename ? { ...item, type: item.type || "output" } : null;
+    const matches = item => {
+      const asset = normalize(item);
+      return asset && extensions.some(ext => String(asset.filename).toLowerCase().endsWith(ext)) ? asset : null;
+    };
+    for (const key of preferredKeys) {
       const raw = output?.[key];
-      const item = Array.isArray(raw) ? raw[0] : raw;
-      if (!item) continue;
-      return typeof item === "string" ? { filename: item, subfolder: "", type: "output" } : item;
+      const values = Array.isArray(raw) ? raw : [raw];
+      for (const value of values) {
+        const asset = matches(value);
+        if (asset) return asset;
+      }
+    }
+    const stack = [output];
+    const seen = new Set();
+    while (stack.length) {
+      const value = stack.pop();
+      if (!value || typeof value !== "object" || seen.has(value)) continue;
+      seen.add(value);
+      const asset = matches(value);
+      if (asset) return asset;
+      stack.push(...(Array.isArray(value) ? value : Object.values(value)));
+    }
+    return null;
+  };
+  const findHistoryAsset = async (promptId, saveId, kind) => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const response = await api.fetchApi(`/history/${encodeURIComponent(promptId)}`);
+      const history = await response.json();
+      const outputs = history?.[promptId]?.outputs || {};
+      const preferred = findAsset(outputs?.[saveId], kind);
+      if (preferred) return preferred;
+      for (const output of Object.values(outputs)) {
+        const asset = findAsset(output, kind);
+        if (asset) return asset;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
     }
     return null;
   };
   const waitForAsset = (promptId, saveId, kind) => new Promise((resolve, reject) => {
     const timeout = setTimeout(() => { cleanup(); reject(new Error(`${kind} generation timed out`)); }, 7200000);
-    const cleanup = () => { clearTimeout(timeout); api.removeEventListener("executed", executed); api.removeEventListener("execution_error", failed); };
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      api.removeEventListener("executed", executed);
+      api.removeEventListener("execution_success", succeeded);
+      api.removeEventListener("execution_error", failed);
+    };
+    const done = asset => { if (settled) return; settled = true; cleanup(); resolve(asset); };
     const executed = event => {
       const detail = event.detail || event;
-      if (detail.prompt_id !== promptId || String(detail.node) !== saveId) return;
-      const asset = findAsset(detail.output, kind); if (!asset) return;
-      cleanup(); resolve(asset);
+      if (detail.prompt_id !== promptId) return;
+      const asset = findAsset(detail.output, kind);
+      if (asset && (String(detail.node) === saveId || kind === "video" || kind === "audio")) done(asset);
     };
-    const failed = event => { const detail = event.detail || event; if (detail.prompt_id !== promptId) return; cleanup(); reject(new Error(detail.exception_message || detail.exception_type || `${kind} generation failed`)); };
-    api.addEventListener("executed", executed); api.addEventListener("execution_error", failed);
+    const succeeded = async event => {
+      const detail = event.detail || event;
+      if (detail.prompt_id !== promptId || settled) return;
+      try {
+        const asset = await findHistoryAsset(promptId, saveId, kind);
+        if (asset) done(asset);
+        else { settled = true; cleanup(); reject(new Error(`ComfyUI finished but no ${kind} file was found`)); }
+      } catch (error) { settled = true; cleanup(); reject(error); }
+    };
+    const failed = event => {
+      const detail = event.detail || event;
+      if (detail.prompt_id !== promptId) return;
+      settled = true; cleanup(); reject(new Error(detail.exception_message || detail.exception_type || `${kind} generation failed`));
+    };
+    api.addEventListener("executed", executed);
+    api.addEventListener("execution_success", succeeded);
+    api.addEventListener("execution_error", failed);
   });
-  const queueGraph = async (graph, saveId, kind) => {
+  const queueGraph = async (graph, saveId, kind, runtime) => {
     await validateGraph(graph);
+    runtime?.prepare("Queueing");
     const queued = await api.fetchApi("/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: api.clientId, extra_data: { enable_previews: true } }) });
     const result = await queued.json();
     if (!queued.ok || result.error || Object.keys(result.node_errors || {}).length) {
       const firstError = Object.values(result.node_errors || {})[0];
       throw new Error(result.error?.message || firstError?.errors?.[0]?.message || `Queue HTTP ${queued.status}`);
     }
+    runtime?.begin(result.prompt_id);
     return waitForAsset(result.prompt_id, saveId, kind);
   };
   const importMedia = async asset => {
@@ -768,10 +846,11 @@ function initMediaUI(root) {
       graph[`${prefix}:lora`].inputs.lora_name = state.mode === "t2v" ? state.models.t2vLora : state.models.i2vLora;
       if (state.audioName) { graph["LTX:external_audio"] = { class_type: "LoadAudio", inputs: { audio: state.audioName }, _meta: { title: "External Audio" } }; graph[`${prefix}:create`].inputs.audio = ["LTX:external_audio", 0]; }
       setStatus(videoStatus, "LTX video is generating...");
-      const asset = await queueGraph(graph, `${prefix}:save`, "video");
+      const asset = await queueGraph(graph, `${prefix}:save`, "video", videoRuntime);
+      video.onerror = () => setStatus(videoStatus, "Video was created, but the browser could not open the preview", true);
       video.src = mediaUrl(asset); video.load(); videoMeta.textContent = asset.subfolder ? `${asset.subfolder}/${asset.filename}` : asset.filename;
       setStatus(videoStatus, "Video ready"); await maybeUnload();
-    } catch (error) { setStatus(videoStatus, error?.message || String(error), true); }
+    } catch (error) { videoRuntime.fail(); setStatus(videoStatus, error?.message || String(error), true); }
     finally { generateVideoButton.disabled = false; generateVideoButton.style.opacity = "1"; }
   };
 
@@ -789,11 +868,11 @@ function initMediaUI(root) {
       Object.assign(graph["VOICE:model"].inputs, { repo_id: state.models.voiceRepo, source: state.models.voiceSource, precision: state.models.voicePrecision, attention: state.models.voiceAttention, local_model_path: state.models.voiceLocalPath });
       graph["VOICE:reference"].inputs.audio = state.voice.refAudioName;
       Object.assign(graph["VOICE:clone"].inputs, { text: state.voice.text, seed: state.voice.seed, language: state.voice.language, ref_text: state.voice.refText, max_new_tokens: clampInt(state.models.voiceMaxTokens, 64, 8192, 2048), ref_audio_max_seconds: clampFloat(state.models.voiceRefSeconds, -1, 120, 30) });
-      const asset = await queueGraph(graph, "VOICE:save", "audio");
+      const asset = await queueGraph(graph, "VOICE:save", "audio", voiceRuntime);
       voiceAudio.src = mediaUrl(asset); voiceAudio.load(); voiceMeta.textContent = asset.subfolder ? `${asset.subfolder}/${asset.filename}` : asset.filename;
       state.audioName = await importMedia(asset); state.audioLabel = asset.filename; persist(); refresh();
       setStatus(voiceStatus, "Voice ready and available for video"); await maybeUnload();
-    } catch (error) { setStatus(voiceStatus, error?.message || String(error), true); }
+    } catch (error) { voiceRuntime.fail(); setStatus(voiceStatus, error?.message || String(error), true); }
     finally { generateVoiceButton.disabled = false; generateVoiceButton.style.opacity = "1"; }
   };
 
@@ -817,11 +896,11 @@ function initMediaUI(root) {
       Object.assign(graph["SONG:positive"].inputs, { tags: state.song.tags, lyrics: state.song.lyrics, seed, bpm: state.song.bpm, duration: state.song.duration, timesignature: state.song.timesignature, language: state.song.language, keyscale: state.song.keyscale, cfg_scale: clampFloat(state.models.songCfg, 0, 100, 2) });
       graph["SONG:sampling"].inputs.shift = clampFloat(state.models.songShift, 0, 100, 3.5);
       Object.assign(graph["SONG:sampler"].inputs, { seed, steps: clampInt(state.models.songSteps, 1, 10000, 50), cfg: clampFloat(state.models.songCfg, 0, 100, 2) });
-      const asset = await queueGraph(graph, "SONG:save", "audio");
+      const asset = await queueGraph(graph, "SONG:save", "audio", songRuntime);
       songAudio.src = mediaUrl(asset); songAudio.load(); songMeta.textContent = asset.subfolder ? `${asset.subfolder}/${asset.filename}` : asset.filename;
       state.audioName = await importMedia(asset); state.audioLabel = asset.filename; persist(); refresh();
       setStatus(songStatus, "Song ready and available for video"); await maybeUnload();
-    } catch (error) { setStatus(songStatus, error?.message || String(error), true); }
+    } catch (error) { songRuntime.fail(); setStatus(songStatus, error?.message || String(error), true); }
     finally { generateSongButton.disabled = false; generateSongButton.style.opacity = "1"; }
   };
 

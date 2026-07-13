@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { createRuntimeMonitor } from "./one_node_runtime_monitor.js";
 
 const LIME = "#f0ff41";
 const C = {
@@ -6921,6 +6922,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         borderRadius:"10px",border:`1px solid ${C.border}`,
         position:"relative",overflow:"hidden",
       });
+      const runtimeMonitor=createRuntimeMonitor(api);
 
       // Placeholder
       const placeholder=mk("div",{
@@ -7304,7 +7306,8 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       // inactive" state to confuse the user.
 
       previewBox.append(placeholder,finalImg,comparerWrap,previewUseWrap,previewSaveBtn,previewDelBtn,autoSaveTog,progWrap);
-      rightPanel.appendChild(previewBox);
+      rightPanel.append(previewBox,runtimeMonitor.root);
+      runtimeMonitor.root.style.marginTop="7px";
 
       mainRow.append(leftPanel,rightPanel);
 
@@ -8845,7 +8848,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
 
       const resetBtn=()=>{
         S.generating=false;S._pendingMeta=null;_activePromptId=null;
-        S._preRunFiles=new Set();persist();_resetGenBtn();
+        S._preRunFiles=new Set();persist();_resetGenBtn();runtimeMonitor.reset();
       };
 
       let _lastGenObj=null; // {filename, subfolder, type} of the currently shown image
@@ -9197,7 +9200,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         // Real user-initiated generation: clear any stuck throwaway flag so events show.
         _oneNodeThrowawayForceClear();
 
-        clearError();S.generating=true;_poseSkeletonUrl=null;
+        clearError();S.generating=true;_poseSkeletonUrl=null;runtimeMonitor.prepare("Preparing");
         _batchNav.style.display="none";_batchImgs=[];_batchTemp=false;
         previewSaveBtn.style.display="none";
 
@@ -9989,6 +9992,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
             showError(fmtErr(wfErrs[0][1]));resetBtn();
           }else{
             _activePromptId=result.prompt_id||null;
+            runtimeMonitor.begin(_activePromptId);
             console.log("[FluxKlein] queued:",result.prompt_id);
           }
         }catch(err){

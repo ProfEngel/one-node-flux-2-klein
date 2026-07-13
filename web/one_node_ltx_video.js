@@ -309,7 +309,8 @@ function initMediaUI(root) {
   const generateVoiceButton = primaryButton("Generate voice");
   const voiceStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
   voiceControls.append(voiceTemplateRow, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Spoken text"), voiceText, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Reference transcript"), voiceRefText, voiceFields, refAudioFile.wrap, generateVoiceButton, voiceStatus);
-  const voicePreview = el("div", { display: "flex", flexDirection: "column", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const voicePreviewStack = el("div", { display: "flex", flexDirection: "column", gap: "8px", minWidth: "0", minHeight: "0", height: "100%" });
+  const voicePreview = el("div", { display: "flex", flexDirection: "column", gap: "12px", flex: "1", minHeight: "0", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
   const voicePreviewContent = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", flex: "1", minHeight: "0" });
   const voiceAudio = el("audio", { width: "100%" }, { controls: true });
   const voiceMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated voice will appear here");
@@ -317,8 +318,9 @@ function initMediaUI(root) {
   const voiceToT2V = smallButton("Use in T2V"); const voiceToI2V = smallButton("Use in I2V");
   const voiceRuntime = createRuntimeMonitor(api);
   voiceRuntime.root.style.flexShrink = "0";
-  voiceSend.append(voiceToT2V, voiceToI2V); voicePreviewContent.append(voiceAudio, voiceMeta, voiceSend); voicePreview.append(voicePreviewContent, voiceRuntime.root);
-  voicePanel.append(voiceControls, voicePreview);
+  voiceSend.append(voiceToT2V, voiceToI2V); voicePreviewContent.append(voiceAudio, voiceMeta, voiceSend); voicePreview.append(voicePreviewContent);
+  voicePreviewStack.append(voicePreview, voiceRuntime.root);
+  voicePanel.append(voiceControls, voicePreviewStack);
   panels.voice = voicePanel;
 
   // Song panel
@@ -347,7 +349,8 @@ function initMediaUI(root) {
   const generateSongButton = primaryButton("Generate song");
   const songStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
   songControls.append(songTagsHeader, songTags, songLyricsHeader, songLyrics, songFields, generateSongButton, songStatus);
-  const songPreview = el("div", { display: "flex", flexDirection: "column", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const songPreviewStack = el("div", { display: "flex", flexDirection: "column", gap: "8px", minWidth: "0", minHeight: "0", height: "100%" });
+  const songPreview = el("div", { display: "flex", flexDirection: "column", gap: "12px", flex: "1", minHeight: "0", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
   const songPreviewContent = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", flex: "1", minHeight: "0" });
   const songAudio = el("audio", { width: "100%" }, { controls: true });
   const songMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated song will appear here");
@@ -355,8 +358,9 @@ function initMediaUI(root) {
   const songToT2V = smallButton("Use in T2V"); const songToI2V = smallButton("Use in I2V");
   const songRuntime = createRuntimeMonitor(api);
   songRuntime.root.style.flexShrink = "0";
-  songSend.append(songToT2V, songToI2V); songPreviewContent.append(songAudio, songMeta, songSend); songPreview.append(songPreviewContent, songRuntime.root);
-  songPanel.append(songControls, songPreview);
+  songSend.append(songToT2V, songToI2V); songPreviewContent.append(songAudio, songMeta, songSend); songPreview.append(songPreviewContent);
+  songPreviewStack.append(songPreview, songRuntime.root);
+  songPanel.append(songControls, songPreviewStack);
   panels.song = songPanel;
 
   overlay.append(videoPanel, voicePanel, songPanel);

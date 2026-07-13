@@ -1,8 +1,11 @@
 import { api } from "../../scripts/api.js";
 
-const VIDEO_STATE_KEY = "one_node_ltx_video_state";
+const MEDIA_STATE_KEY = "one_node_ltx_video_state";
 const IMAGE_STATE_KEY = "one_node_flux_klein_state";
 const LIME = "#f0ff41";
+const BG = "#0b0b0b";
+const PANEL = "#151515";
+const BORDER = "#343434";
 
 const DEFAULT_STATE = {
   mode: "t2v",
@@ -15,7 +18,27 @@ const DEFAULT_STATE = {
   duration: 5,
   seed: 0,
   imageName: "",
+  imageLabel: "",
   audioName: "",
+  audioLabel: "",
+  voice: {
+    text: "",
+    refText: "",
+    refAudioName: "",
+    refAudioLabel: "",
+    language: "German",
+    seed: 42,
+  },
+  song: {
+    tags: "",
+    lyrics: "",
+    duration: 180,
+    bpm: 120,
+    language: "de",
+    keyscale: "E minor",
+    timesignature: "4",
+    seed: 0,
+  },
   models: {
     unet: "ltx-2.3-22b-distilled-Q4_K_M.gguf",
     clip: "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
@@ -25,6 +48,22 @@ const DEFAULT_STATE = {
     upscaler: "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
     t2vLora: "ltx2.3\\ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors",
     i2vLora: "ltx2.3\\ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors",
+    voiceRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    voiceSource: "HuggingFace",
+    voicePrecision: "bf16",
+    voiceAttention: "auto",
+    voiceLocalPath: "",
+    voiceMaxTokens: 2048,
+    voiceRefSeconds: 30,
+    songUnet: "acestep_v1.5_xl_turbo_bf16.safetensors",
+    songClip1: "qwen_0.6b_ace15.safetensors",
+    songClip2: "qwen_1.7b_ace15.safetensors",
+    songVae: "ace_1.5_vae.safetensors",
+    songWeightDtype: "default",
+    songDevice: "default",
+    songShift: 3.5,
+    songSteps: 50,
+    songCfg: 2.0,
   },
 };
 
@@ -32,177 +71,344 @@ const readJson = (key, fallback = {}) => {
   try { return { ...fallback, ...(JSON.parse(localStorage.getItem(key) || "{}")) }; }
   catch { return { ...fallback }; }
 };
-
 const el = (tag, style = {}, attrs = {}) => {
   const node = document.createElement(tag);
   Object.assign(node.style, style);
   Object.assign(node, attrs);
   return node;
 };
-
-const text = (node, value) => { node.textContent = value; return node; };
+const tx = (node, value) => { node.textContent = value; return node; };
 const clampInt = (value, min, max, fallback) => {
   const parsed = Math.round(Number(value));
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
 };
+const clampFloat = (value, min, max, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+};
 
-function initVideoUI(root) {
-  if (root.dataset.ltxVideoReady === "1") return;
+function initMediaUI(root) {
+  if (root.dataset.oneNodeMediaReady === "1") return;
   const poseButton = [...root.querySelectorAll("button")].find(button => button.textContent.trim() === "POSE");
   if (!poseButton?.parentElement) return;
-  root.dataset.ltxVideoReady = "1";
+  root.dataset.oneNodeMediaReady = "1";
 
-  const state = readJson(VIDEO_STATE_KEY, DEFAULT_STATE);
+  const state = readJson(MEDIA_STATE_KEY, DEFAULT_STATE);
   state.enhanced = { ...DEFAULT_STATE.enhanced, ...(state.enhanced || {}) };
   state.enhance = { ...DEFAULT_STATE.enhance, ...(state.enhance || {}) };
   state.width = { ...DEFAULT_STATE.width, ...(state.width || {}) };
   state.height = { ...DEFAULT_STATE.height, ...(state.height || {}) };
+  state.voice = { ...DEFAULT_STATE.voice, ...(state.voice || {}) };
+  state.song = { ...DEFAULT_STATE.song, ...(state.song || {}) };
   state.models = { ...DEFAULT_STATE.models, ...(state.models || {}) };
-  const persist = () => localStorage.setItem(VIDEO_STATE_KEY, JSON.stringify(state));
+  const persist = () => localStorage.setItem(MEDIA_STATE_KEY, JSON.stringify(state));
   const sharedState = () => readJson(IMAGE_STATE_KEY, {});
 
+  const modeBar = poseButton.parentElement;
+  modeBar.style.overflowX = "auto";
+  modeBar.style.overflowY = "hidden";
+  modeBar.style.scrollbarWidth = "thin";
+  modeBar.style.flexWrap = "nowrap";
+  const imagePills = [...modeBar.querySelectorAll("button")];
   const makePill = label => {
     const button = poseButton.cloneNode(false);
     button.textContent = label;
-    button.style.marginLeft = "0";
-    button.style.flexShrink = "0";
+    Object.assign(button.style, { marginLeft: "0", flexShrink: "0", paddingLeft: "7px", paddingRight: "7px", fontSize: "9px" });
     return button;
   };
-  const t2vPill = makePill("T2V");
-  const i2vPill = makePill("I2V");
-  const imagePills = [...poseButton.parentElement.querySelectorAll("button")];
-  poseButton.parentElement.append(t2vPill, i2vPill);
+  const pills = {
+    t2v: makePill("T2V"),
+    i2v: makePill("I2V"),
+    clonevoice: makePill("CloneVoice"),
+    song: makePill("Song"),
+  };
+  modeBar.append(pills.t2v, pills.i2v, pills.clonevoice, pills.song);
 
   const overlay = el("div", {
-    position: "absolute", left: "0", right: "0", top: "31px", bottom: "0", zIndex: "230",
-    display: "none", background: "#0b0b0b", color: "#dedede", padding: "10px 14px 12px",
+    position: "absolute", left: "0", right: "0", bottom: "0", zIndex: "42",
+    display: "none", background: BG, color: "#dedede", padding: "10px 14px 12px",
     boxSizing: "border-box", fontFamily: "inherit", overflow: "hidden",
   });
+  const placeOverlay = () => {
+    const rootBox = root.getBoundingClientRect();
+    const barBox = modeBar.getBoundingClientRect();
+    overlay.style.top = `${Math.max(34, Math.round(barBox.bottom - rootBox.top + 3))}px`;
+  };
+  new ResizeObserver(placeOverlay).observe(modeBar);
 
-  const layout = el("div", { display: "grid", gridTemplateColumns: "390px minmax(0,1fr)", gap: "12px", height: "100%" });
-  const controls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflow: "hidden" });
-  const preview = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", minHeight: "0" });
-
-  const row = el("div", { display: "flex", alignItems: "center", gap: "6px", minHeight: "24px" });
-  const modeLabel = text(el("div", { color: LIME, fontWeight: "800", fontSize: "11px", letterSpacing: ".06em" }), "LTX 2.3 · T2V");
-  const spacer = el("div", { flex: "1" });
-  const smallButton = label => text(el("button", {
-    border: "1px solid #383838", borderRadius: "5px", background: "#171717", color: "#bdbdbd",
+  const smallButton = label => tx(el("button", {
+    border: `1px solid ${BORDER}`, borderRadius: "5px", background: "#171717", color: "#bdbdbd",
     padding: "4px 8px", fontSize: "9px", fontWeight: "700", cursor: "pointer", whiteSpace: "nowrap",
   }), label);
-  const modelButton = smallButton("Models");
-  const reviewButton = smallButton("Review JSON");
-  row.append(modeLabel, spacer, modelButton, reviewButton);
-
-  const promptHeader = el("div", { display: "flex", alignItems: "center", gap: "7px" });
-  promptHeader.append(text(el("span", { fontSize: "9px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Prompt"));
-  const enhanceToggle = smallButton("Enhance off");
-  promptHeader.append(enhanceToggle);
-  const promptTA = el("textarea", {
-    width: "100%", minHeight: "118px", flex: "1", resize: "none", border: "1px solid #303030",
-    borderRadius: "6px", background: "#171717", color: "#dedede", padding: "9px 10px", boxSizing: "border-box",
+  const primaryButton = label => tx(el("button", {
+    height: "34px", border: "0", borderRadius: "6px", background: LIME, color: "#111",
+    fontSize: "12px", fontWeight: "800", cursor: "pointer", padding: "0 16px",
+  }), label);
+  const textarea = (value, placeholder, minHeight = "100px") => el("textarea", {
+    width: "100%", minHeight, resize: "none", border: `1px solid ${BORDER}`, borderRadius: "6px",
+    background: "#171717", color: "#dedede", padding: "9px 10px", boxSizing: "border-box",
     fontSize: "11px", lineHeight: "1.45", outline: "none", fontFamily: "inherit",
-  }, { value: state.prompt || "", placeholder: "Describe the shot, motion, camera and sound..." });
-
-  const jsonPanel = el("div", { display: "none", flexDirection: "column", gap: "6px", flex: "1", minHeight: "0" });
-  const jsonTA = el("textarea", {
-    width: "100%", flex: "1", resize: "none", border: "1px solid #3c430e", borderRadius: "6px",
-    background: "#121407", color: "#dfe87b", padding: "8px", boxSizing: "border-box", minHeight: "150px",
-    font: "10px/1.45 ui-monospace,Consolas,monospace", outline: "none",
-  });
-  const useJsonButton = smallButton("Use without Enhance");
-  jsonPanel.append(jsonTA, useJsonButton);
-
-  const fields = el("div", { display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: "5px" });
-  const numberField = (label, value, min, max) => {
+  }, { value: value || "", placeholder });
+  const numberField = (label, value, min, max, step = 1) => {
     const wrap = el("label", { display: "flex", flexDirection: "column", gap: "3px", color: "#777", fontSize: "8px", fontWeight: "700", textTransform: "uppercase" });
-    const input = el("input", { width: "100%", background: "#171717", border: "1px solid #303030", borderRadius: "4px", color: "#ddd", padding: "5px", boxSizing: "border-box", fontSize: "10px", outline: "none" }, { type: "number", value: String(value), min: String(min), max: String(max) });
-    wrap.append(text(el("span"), label), input);
+    const input = el("input", { width: "100%", background: "#171717", border: `1px solid ${BORDER}`, borderRadius: "4px", color: "#ddd", padding: "5px", boxSizing: "border-box", fontSize: "10px", outline: "none" }, { type: "number", value: String(value), min: String(min), max: String(max), step: String(step) });
+    wrap.append(tx(el("span"), label), input);
     return { wrap, input };
   };
-  const widthField = numberField("Width", state.width[state.mode], 256, 4096);
-  const heightField = numberField("Height", state.height[state.mode], 256, 4096);
-  const fpsField = numberField("FPS", state.fps, 1, 60);
-  const durationField = numberField("Seconds", state.duration, 1, 120);
-  const seedField = numberField("Seed · 0 auto", state.seed, 0, 999999999999999);
-  fields.append(widthField.wrap, heightField.wrap, fpsField.wrap, durationField.wrap, seedField.wrap);
-
-  const assets = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" });
+  const textField = (label, value, placeholder = "") => {
+    const wrap = el("label", { display: "flex", flexDirection: "column", gap: "3px", color: "#777", fontSize: "8px", fontWeight: "700", textTransform: "uppercase", minWidth: "0" });
+    const input = el("input", { width: "100%", background: "#171717", border: `1px solid ${BORDER}`, borderRadius: "4px", color: "#ddd", padding: "6px", boxSizing: "border-box", fontSize: "9px", outline: "none" }, { value: value ?? "", placeholder });
+    wrap.append(tx(el("span"), label), input);
+    return { wrap, input };
+  };
+  const selectField = (label, value, options) => {
+    const wrap = el("label", { display: "flex", flexDirection: "column", gap: "3px", color: "#777", fontSize: "8px", fontWeight: "700", textTransform: "uppercase" });
+    const select = el("select", { width: "100%", background: "#171717", border: `1px solid ${BORDER}`, borderRadius: "4px", color: "#ddd", padding: "5px", boxSizing: "border-box", fontSize: "10px", outline: "none" });
+    for (const option of options) select.append(tx(el("option", {}, { value: option }), option));
+    select.value = value;
+    wrap.append(tx(el("span"), label), select);
+    return { wrap, input: select };
+  };
   const fileControl = (label, accept) => {
     const wrap = el("label", { display: "flex", alignItems: "center", gap: "6px", minWidth: "0", border: "1px dashed #3a3a3a", borderRadius: "5px", padding: "6px 8px", cursor: "pointer", background: "#141414" });
     const input = el("input", { display: "none" }, { type: "file", accept });
-    const caption = text(el("span", { color: "#aaa", fontSize: "9px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }), label);
+    const caption = tx(el("span", { color: "#aaa", fontSize: "9px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }), label);
     wrap.append(input, caption);
     return { wrap, input, caption };
   };
-  const imageFile = fileControl("First frame", "image/*");
+  const panelHeader = (label, extra = []) => {
+    const row = el("div", { display: "flex", alignItems: "center", gap: "6px", minHeight: "24px" });
+    row.append(tx(el("div", { color: LIME, fontWeight: "800", fontSize: "11px", letterSpacing: "0" }), label), el("div", { flex: "1" }), ...extra);
+    return row;
+  };
+  const mediaUrl = asset => api.apiURL(`/view?filename=${encodeURIComponent(asset.filename)}&type=${encodeURIComponent(asset.type || "output")}&subfolder=${encodeURIComponent(asset.subfolder || "")}`);
+
+  const panels = {};
+  const settingsButton = smallButton("Models");
+  const helpButton = smallButton("Help");
+
+  // Video panel
+  const videoPanel = el("div", { display: "none", gridTemplateColumns: "390px minmax(0,1fr)", gap: "12px", height: "100%" });
+  const videoControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflow: "hidden" });
+  const reviewButton = smallButton("Review JSON");
+  const videoHeaderLabel = tx(el("div", { color: LIME, fontWeight: "800", fontSize: "11px" }), "LTX 2.3 - T2V");
+  const videoHeader = el("div", { display: "flex", alignItems: "center", gap: "6px", minHeight: "24px" });
+  videoHeader.append(videoHeaderLabel, el("div", { flex: "1" }), helpButton, settingsButton, reviewButton);
+  const promptHeader = el("div", { display: "flex", alignItems: "center", gap: "7px" });
+  promptHeader.append(tx(el("span", { fontSize: "9px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Prompt"));
+  const enhanceToggle = smallButton("Enhance off");
+  promptHeader.append(enhanceToggle);
+  const promptTA = textarea(state.prompt, "Describe the shot, motion, camera and sound...", "112px");
+  promptTA.style.flex = "1";
+  const jsonPanel = el("div", { display: "none", flexDirection: "column", gap: "6px", flex: "1", minHeight: "0" });
+  const jsonTA = textarea("", "Enhanced JSON", "150px");
+  Object.assign(jsonTA.style, { flex: "1", background: "#121407", color: "#dfe87b", borderColor: "#3c430e", font: "10px/1.45 ui-monospace,Consolas,monospace" });
+  const useJsonButton = smallButton("Use without Enhance");
+  jsonPanel.append(jsonTA, useJsonButton);
+  const videoFields = el("div", { display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: "5px" });
+  const widthField = numberField("Width", state.width[state.mode] || 1280, 256, 4096);
+  const heightField = numberField("Height", state.height[state.mode] || 720, 256, 4096);
+  const fpsField = numberField("FPS", state.fps, 1, 60);
+  const durationField = numberField("Seconds", state.duration, 1, 120);
+  const seedField = numberField("Seed - 0 auto", state.seed, 0, 999999999999999);
+  videoFields.append(widthField.wrap, heightField.wrap, fpsField.wrap, durationField.wrap, seedField.wrap);
+  const videoAssets = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" });
+  const imageFile = fileControl("Upload first frame", "image/*");
   const audioFile = fileControl("Optional audio", "audio/*");
-  assets.append(imageFile.wrap, audioFile.wrap);
-
-  const actionRow = el("div", { display: "flex", alignItems: "center", gap: "7px" });
-  const generateButton = text(el("button", {
-    flex: "1", height: "34px", border: "0", borderRadius: "6px", background: LIME, color: "#111",
-    fontSize: "12px", fontWeight: "800", cursor: "pointer",
-  }), "Generate video");
+  const imageActions = el("div", { display: "flex", gap: "5px", minWidth: "0" });
+  const galleryImageButton = smallButton("From Gallery");
+  imageActions.append(imageFile.wrap, galleryImageButton);
+  imageFile.wrap.style.flex = "1";
+  videoAssets.append(imageActions, audioFile.wrap);
+  const videoActions = el("div", { display: "flex", gap: "7px" });
+  const generateVideoButton = primaryButton("Generate video"); generateVideoButton.style.flex = "1";
+  const clearImageButton = smallButton("Clear image");
   const clearAudioButton = smallButton("Clear audio");
-  actionRow.append(generateButton, clearAudioButton);
-  const status = text(el("div", { minHeight: "14px", color: "#888", fontSize: "9px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }), "Ready");
-
+  videoActions.append(generateVideoButton, clearImageButton, clearAudioButton);
+  const videoStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }), "Ready");
+  const videoPreview = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", minHeight: "0" });
   const video = el("video", { width: "100%", flex: "1", minHeight: "0", objectFit: "contain", background: "#050505", border: "1px solid #292929", borderRadius: "6px" }, { controls: true });
-  const outputMeta = text(el("div", { minHeight: "18px", color: "#777", fontSize: "9px", textAlign: "right" }), "Generated video will appear here");
-  preview.append(video, outputMeta);
+  const videoMeta = tx(el("div", { minHeight: "18px", color: "#777", fontSize: "9px", textAlign: "right" }), "Generated video will appear here");
+  videoPreview.append(video, videoMeta);
+  videoControls.append(videoHeader, promptHeader, promptTA, jsonPanel, videoFields, videoAssets, videoActions, videoStatus);
+  videoPanel.append(videoControls, videoPreview);
+  panels.video = videoPanel;
 
-  controls.append(row, promptHeader, promptTA, jsonPanel, fields, assets, actionRow, status);
-  layout.append(controls, preview);
-  overlay.append(layout);
+  // CloneVoice panel
+  const voicePanel = el("div", { display: "none", gridTemplateColumns: "420px minmax(0,1fr)", gap: "12px", height: "100%" });
+  const voiceControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflow: "hidden" });
+  const voiceModelsButton = smallButton("Models");
+  const voiceHelpButton = smallButton("Help");
+  voiceControls.append(panelHeader("Qwen3 TTS - CloneVoice", [voiceHelpButton, voiceModelsButton]));
+  const voiceText = textarea(state.voice.text, "Text to speak with the cloned voice...", "105px");
+  const voiceRefText = textarea(state.voice.refText, "Exact transcript of the reference audio...", "72px");
+  const voiceFields = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" });
+  const voiceLanguage = selectField("Language", state.voice.language, ["Auto", "German", "English", "French", "Spanish", "Italian", "Portuguese", "Chinese", "Japanese", "Korean", "Russian"]);
+  const voiceSeed = numberField("Seed", state.voice.seed, 1, 999999999999999);
+  voiceFields.append(voiceLanguage.wrap, voiceSeed.wrap);
+  const refAudioFile = fileControl("Reference voice audio", "audio/*");
+  const generateVoiceButton = primaryButton("Generate voice");
+  const voiceStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
+  voiceControls.append(tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Spoken text"), voiceText, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Reference transcript"), voiceRefText, voiceFields, refAudioFile.wrap, generateVoiceButton, voiceStatus);
+  const voicePreview = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const voiceAudio = el("audio", { width: "100%" }, { controls: true });
+  const voiceMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated voice will appear here");
+  const voiceSend = el("div", { display: "flex", justifyContent: "center", gap: "7px" });
+  const voiceToT2V = smallButton("Use in T2V"); const voiceToI2V = smallButton("Use in I2V");
+  voiceSend.append(voiceToT2V, voiceToI2V); voicePreview.append(voiceAudio, voiceMeta, voiceSend);
+  voicePanel.append(voiceControls, voicePreview);
+  panels.voice = voicePanel;
+
+  // Song panel
+  const songPanel = el("div", { display: "none", gridTemplateColumns: "430px minmax(0,1fr)", gap: "12px", height: "100%" });
+  const songControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflow: "hidden" });
+  const songModelsButton = smallButton("Models"); const songHelpButton = smallButton("Help");
+  songControls.append(panelHeader("ACE-Step 1.5 - Song", [songHelpButton, songModelsButton]));
+  const songTags = textarea(state.song.tags, "Style, genre, instruments, mood, vocals...", "62px");
+  const songLyrics = textarea(state.song.lyrics, "Lyrics with optional [Verse], [Chorus] and [Bridge] sections...", "105px");
+  const songFields = el("div", { display: "grid", gridTemplateColumns: "repeat(6,minmax(0,1fr))", gap: "5px" });
+  const songDuration = numberField("Seconds", state.song.duration, 1, 1000, 0.1);
+  const songBpm = numberField("BPM", state.song.bpm, 10, 300);
+  const songLanguage = textField("Language", state.song.language);
+  const songKey = textField("Key", state.song.keyscale);
+  const songTime = selectField("Time", state.song.timesignature, ["2", "3", "4", "6"]);
+  const songSeed = numberField("Seed - 0 auto", state.song.seed, 0, 999999999999999);
+  songFields.append(songDuration.wrap, songBpm.wrap, songLanguage.wrap, songKey.wrap, songTime.wrap, songSeed.wrap);
+  const generateSongButton = primaryButton("Generate song");
+  const songStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
+  songControls.append(tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Music description"), songTags, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Lyrics"), songLyrics, songFields, generateSongButton, songStatus);
+  const songPreview = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const songAudio = el("audio", { width: "100%" }, { controls: true });
+  const songMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated song will appear here");
+  const songSend = el("div", { display: "flex", justifyContent: "center", gap: "7px" });
+  const songToT2V = smallButton("Use in T2V"); const songToI2V = smallButton("Use in I2V");
+  songSend.append(songToT2V, songToI2V); songPreview.append(songAudio, songMeta, songSend);
+  songPanel.append(songControls, songPreview);
+  panels.song = songPanel;
+
+  overlay.append(videoPanel, voicePanel, songPanel);
   root.append(overlay);
 
-  const modelOverlay = el("div", { position: "absolute", inset: "0", zIndex: "4", display: "none", flexDirection: "column", gap: "8px", background: "#0b0b0b", padding: "12px 14px", boxSizing: "border-box" });
-  const modelHead = el("div", { display: "flex", alignItems: "center" });
-  modelHead.append(text(el("div", { color: LIME, fontWeight: "800", fontSize: "11px", flex: "1" }), "LTX model files"));
-  const closeModels = smallButton("Close"); modelHead.append(closeModels);
-  const modelGrid = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "7px", overflow: "auto" });
+  // Context-specific media settings
+  const settingsOverlay = el("div", { position: "absolute", inset: "0", zIndex: "8", display: "none", flexDirection: "column", gap: "8px", background: BG, padding: "12px 14px", boxSizing: "border-box" });
+  const settingsTitle = tx(el("div", { color: LIME, fontWeight: "800", fontSize: "11px", flex: "1" }), "Media models");
+  const closeSettings = smallButton("Close");
+  const settingsHead = el("div", { display: "flex", alignItems: "center" }); settingsHead.append(settingsTitle, closeSettings);
+  const settingsGrid = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "7px", overflow: "auto", paddingRight: "4px" });
   const modelFields = {};
-  const modelLabels = { unet:"Diffusion model",clip:"Text encoder",connector:"Connector",videoVae:"Video VAE",audioVae:"Audio VAE",upscaler:"Latent upscaler",t2vLora:"T2V LoRA",i2vLora:"I2V LoRA" };
-  for (const [key, label] of Object.entries(modelLabels)) {
-    const wrap = el("label", { display: "flex", flexDirection: "column", gap: "3px", color: "#777", fontSize: "8px", fontWeight: "700", textTransform: "uppercase" });
-    const input = el("input", { width: "100%", background: "#171717", border: "1px solid #303030", borderRadius: "4px", color: "#ddd", padding: "6px", boxSizing: "border-box", fontSize: "9px", outline: "none" }, { value: state.models[key] });
-    input.onchange = () => { state.models[key] = input.value.trim(); persist(); };
-    wrap.append(text(el("span"), label), input); modelGrid.append(wrap); modelFields[key] = input;
-  }
-  modelOverlay.append(modelHead, modelGrid); overlay.append(modelOverlay);
-
-  const setStatus = (message, error = false) => { status.textContent = message; status.style.color = error ? "#ff6b6b" : "#888"; };
-  const refresh = () => {
-    const mode = state.mode;
-    modeLabel.textContent = `LTX 2.3 · ${mode.toUpperCase()}`;
-    t2vPill.style.background = mode === "t2v" && overlay.style.display !== "none" ? LIME : "#202020";
-    t2vPill.style.color = mode === "t2v" && overlay.style.display !== "none" ? "#111" : "#bbb";
-    i2vPill.style.background = mode === "i2v" && overlay.style.display !== "none" ? LIME : "#202020";
-    i2vPill.style.color = mode === "i2v" && overlay.style.display !== "none" ? "#111" : "#bbb";
-    imageFile.wrap.style.display = mode === "i2v" ? "flex" : "none";
-    imageFile.caption.textContent = state.imageName || "First frame";
-    audioFile.caption.textContent = state.audioName || "Optional audio";
-    enhanceToggle.textContent = state.enhance[mode] ? "Enhance on" : "Enhance off";
-    enhanceToggle.style.color = state.enhance[mode] ? LIME : "#aaa";
-    enhanceToggle.style.borderColor = state.enhance[mode] ? "#768018" : "#383838";
-    reviewButton.disabled = !state.enhanced[mode];
-    reviewButton.style.opacity = state.enhanced[mode] ? "1" : ".4";
-    widthField.input.value = state.width[mode]; heightField.input.value = state.height[mode];
+  const modelGroups = {
+    "LTX 2.3 video": { unet: "Diffusion model", clip: "Text encoder", connector: "Connector", videoVae: "Video VAE", audioVae: "Audio VAE", upscaler: "Latent upscaler", t2vLora: "T2V LoRA", i2vLora: "I2V LoRA" },
+    "Qwen3 CloneVoice": { voiceRepo: "Repository ID", voiceSource: "Source", voicePrecision: "Precision", voiceAttention: "Attention", voiceLocalPath: "Local model path", voiceMaxTokens: "Max output tokens", voiceRefSeconds: "Reference max seconds" },
+    "ACE-Step Song": { songUnet: "Diffusion model", songClip1: "Text encoder 1", songClip2: "Text encoder 2", songVae: "Audio VAE", songWeightDtype: "Weight dtype", songDevice: "Encoder device", songShift: "Model shift", songSteps: "Sampling steps", songCfg: "CFG" },
   };
+  for (const [group, fields] of Object.entries(modelGroups)) {
+    const heading = tx(el("div", { gridColumn: "1 / -1", color: "#ddd", fontSize: "10px", fontWeight: "800", borderBottom: `1px solid ${BORDER}`, padding: "7px 0 4px" }), group);
+    settingsGrid.append(heading);
+    for (const [key, label] of Object.entries(fields)) {
+      const field = textField(label, state.models[key]);
+      field.input.onchange = () => {
+        const original = DEFAULT_STATE.models[key];
+        state.models[key] = typeof original === "number" ? Number(field.input.value) : field.input.value.trim();
+        persist();
+      };
+      settingsGrid.append(field.wrap); modelFields[key] = field.input;
+    }
+  }
+  settingsOverlay.append(settingsHead, settingsGrid); overlay.append(settingsOverlay);
 
+  // Media help with model names and download locations
+  const helpOverlay = el("div", { position: "absolute", inset: "0", zIndex: "9", display: "none", flexDirection: "column", gap: "10px", background: BG, padding: "12px 14px", boxSizing: "border-box", overflow: "auto" });
+  const closeHelp = smallButton("Close");
+  const helpHead = el("div", { display: "flex", alignItems: "center" });
+  helpHead.append(tx(el("div", { color: LIME, fontWeight: "800", fontSize: "11px", flex: "1" }), "Media models and locations"), closeHelp);
+  const helpBody = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" });
+  const helpCard = (title, rows) => {
+    const card = el("section", { border: `1px solid ${BORDER}`, borderRadius: "6px", padding: "9px", background: PANEL, minWidth: "0" });
+    card.append(tx(el("div", { color: "#ddd", fontSize: "10px", fontWeight: "800", marginBottom: "7px" }), title));
+    for (const row of rows) {
+      const line = el("div", { fontSize: "9px", color: "#aaa", margin: "5px 0", overflowWrap: "anywhere" });
+      const link = el("a", { color: LIME, textDecoration: "none" }, { href: row.url, target: "_blank", rel: "noopener", textContent: row.name });
+      line.append(link, tx(el("span"), ` -> ${row.path}`)); card.append(line);
+    }
+    return card;
+  };
+  helpBody.append(
+    helpCard("LTX 2.3 video", [
+      { name: "LTX-2.3 model files", url: "https://huggingface.co/Lightricks/LTX-2.3", path: "models/diffusion_models, vae, text_encoders" },
+      { name: "LTX spatial upscaler", url: "https://huggingface.co/Lightricks/LTX-2", path: "models/latent_upscale_models" },
+      { name: "LTX distilled LoRA", url: "https://huggingface.co/Lightricks/LTX-2", path: "models/loras" },
+    ]),
+    helpCard("Qwen3 CloneVoice", [
+      { name: "Qwen3-TTS-12Hz-1.7B-Base", url: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base", path: "HuggingFace cache or local model path" },
+      { name: "ComfyUI-Qwen3-TTS", url: "https://github.com/DarioFT/ComfyUI-Qwen3-TTS", path: "custom_nodes" },
+    ]),
+    helpCard("ACE-Step 1.5 Song", [
+      { name: "acestep_v1.5_xl_turbo_bf16.safetensors", url: "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files", path: "models/diffusion_models" },
+      { name: "qwen_0.6b_ace15 + qwen_1.7b_ace15", url: "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files", path: "models/text_encoders" },
+      { name: "ace_1.5_vae.safetensors", url: "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files", path: "models/vae" },
+    ]),
+    helpCard("Media handoff", [
+      { name: "Gallery: Use as - I2V first frame", url: "#", path: "select any generated image" },
+      { name: "CloneVoice/Song: Use in T2V or I2V", url: "#", path: "sets optional video audio" },
+    ]),
+  );
+  helpOverlay.append(helpHead, helpBody); overlay.append(helpOverlay);
+
+  const setStatus = (node, message, error = false) => { node.textContent = message; node.style.color = error ? "#ff6b6b" : "#888"; };
+  const refresh = () => {
+    const active = overlay.style.display !== "none";
+    for (const [mode, pill] of Object.entries(pills)) {
+      const selected = active && state.mode === mode;
+      pill.style.background = selected ? LIME : "#202020";
+      pill.style.color = selected ? "#111" : "#bbb";
+    }
+    const videoMode = state.mode === "t2v" || state.mode === "i2v";
+    videoPanel.style.display = videoMode ? "grid" : "none";
+    voicePanel.style.display = state.mode === "clonevoice" ? "grid" : "none";
+    songPanel.style.display = state.mode === "song" ? "grid" : "none";
+    if (videoMode) {
+      videoHeaderLabel.textContent = `LTX 2.3 - ${state.mode.toUpperCase()}`;
+      imageActions.style.display = state.mode === "i2v" ? "flex" : "none";
+      clearImageButton.style.display = state.mode === "i2v" ? "block" : "none";
+      imageFile.caption.textContent = state.imageLabel || state.imageName || "Upload first frame";
+      audioFile.caption.textContent = state.audioLabel || state.audioName || "Optional audio";
+      enhanceToggle.textContent = state.enhance[state.mode] ? "Enhance on" : "Enhance off";
+      enhanceToggle.style.color = state.enhance[state.mode] ? LIME : "#aaa";
+      reviewButton.disabled = !state.enhanced[state.mode];
+      reviewButton.style.opacity = state.enhanced[state.mode] ? "1" : ".4";
+      widthField.input.value = state.width[state.mode]; heightField.input.value = state.height[state.mode];
+    }
+    refAudioFile.caption.textContent = state.voice.refAudioLabel || state.voice.refAudioName || "Reference voice audio";
+    placeOverlay();
+  };
   const openMode = mode => {
-    state.mode = mode; overlay.style.display = "block"; modelOverlay.style.display = "none";
+    state.mode = mode; overlay.style.display = "block"; settingsOverlay.style.display = "none"; helpOverlay.style.display = "none";
     for (const button of imagePills) { button.style.background = "#202020"; button.style.color = "#bbb"; }
     jsonPanel.style.display = "none"; promptTA.style.display = "block"; promptTA.value = state.prompt || "";
     persist(); refresh();
   };
-  t2vPill.onclick = () => openMode("t2v");
-  i2vPill.onclick = () => openMode("i2v");
-  for (const button of [...poseButton.parentElement.querySelectorAll("button")]) {
-    if (button === t2vPill || button === i2vPill) continue;
-    button.addEventListener("click", () => { overlay.style.display = "none"; refresh(); });
-  }
+  Object.entries(pills).forEach(([mode, pill]) => { pill.onclick = () => openMode(mode); });
+  for (const button of imagePills) button.addEventListener("click", () => { overlay.style.display = "none"; refresh(); });
+
+  const openSettings = () => { helpOverlay.style.display = "none"; settingsOverlay.style.display = "flex"; };
+  const openHelp = () => { settingsOverlay.style.display = "none"; helpOverlay.style.display = "flex"; };
+  settingsButton.onclick = voiceModelsButton.onclick = songModelsButton.onclick = openSettings;
+  helpButton.onclick = voiceHelpButton.onclick = songHelpButton.onclick = openHelp;
+  closeSettings.onclick = () => { settingsOverlay.style.display = "none"; };
+  closeHelp.onclick = () => { helpOverlay.style.display = "none"; };
+
+  window.addEventListener("one-node:settings-request", event => {
+    if (overlay.style.display === "none") return;
+    event.preventDefault(); openSettings();
+  });
+  window.addEventListener("one-node:main-overlay-open", () => { overlay.style.display = "none"; refresh(); });
+  window.addEventListener("one-node:media-handoff", event => {
+    const detail = event.detail || {};
+    if (detail.kind !== "image" || detail.target !== "i2v") return;
+    state.imageName = detail.name || detail.asset?.filename || "";
+    state.imageLabel = detail.asset?.filename || state.imageName;
+    persist(); openMode("i2v"); setStatus(videoStatus, "Gallery image selected as first frame");
+  });
 
   enhanceToggle.onclick = () => { state.enhance[state.mode] = !state.enhance[state.mode]; persist(); refresh(); };
   reviewButton.onclick = () => {
@@ -215,8 +421,6 @@ function initVideoUI(root) {
     state.enhanced[state.mode] = value; state.prompt = value; state.enhance[state.mode] = false;
     promptTA.value = value; jsonPanel.style.display = "none"; promptTA.style.display = "block"; persist(); refresh();
   };
-  modelButton.onclick = () => { modelOverlay.style.display = "flex"; };
-  closeModels.onclick = () => { modelOverlay.style.display = "none"; };
 
   const upload = async file => {
     const form = new FormData(); form.append("image", file, file.name); form.append("type", "input"); form.append("overwrite", "true");
@@ -227,88 +431,114 @@ function initVideoUI(root) {
   };
   imageFile.input.onchange = async () => {
     const file = imageFile.input.files?.[0]; if (!file) return;
-    try { setStatus("Uploading first frame..."); state.imageName = await upload(file); persist(); refresh(); setStatus("First frame ready"); }
-    catch (error) { setStatus(`Image upload failed: ${error.message}`, true); }
+    try { setStatus(videoStatus, "Uploading first frame..."); state.imageName = await upload(file); state.imageLabel = file.name; persist(); refresh(); setStatus(videoStatus, "First frame ready"); }
+    catch (error) { setStatus(videoStatus, `Image upload failed: ${error.message}`, true); }
   };
   audioFile.input.onchange = async () => {
     const file = audioFile.input.files?.[0]; if (!file) return;
-    try { setStatus("Uploading audio..."); state.audioName = await upload(file); persist(); refresh(); setStatus("External audio ready"); }
-    catch (error) { setStatus(`Audio upload failed: ${error.message}`, true); }
+    try { setStatus(videoStatus, "Uploading audio..."); state.audioName = await upload(file); state.audioLabel = file.name; persist(); refresh(); setStatus(videoStatus, "External audio ready"); }
+    catch (error) { setStatus(videoStatus, `Audio upload failed: ${error.message}`, true); }
   };
-  clearAudioButton.onclick = () => { state.audioName = ""; audioFile.input.value = ""; persist(); refresh(); };
+  refAudioFile.input.onchange = async () => {
+    const file = refAudioFile.input.files?.[0]; if (!file) return;
+    try { setStatus(voiceStatus, "Uploading reference voice..."); state.voice.refAudioName = await upload(file); state.voice.refAudioLabel = file.name; persist(); refresh(); setStatus(voiceStatus, "Reference voice ready"); }
+    catch (error) { setStatus(voiceStatus, `Reference upload failed: ${error.message}`, true); }
+  };
+  clearImageButton.onclick = () => { state.imageName = ""; state.imageLabel = ""; imageFile.input.value = ""; persist(); refresh(); };
+  clearAudioButton.onclick = () => { state.audioName = ""; state.audioLabel = ""; audioFile.input.value = ""; persist(); refresh(); };
+  galleryImageButton.onclick = () => {
+    overlay.style.display = "none"; refresh();
+    const gallery = [...root.querySelectorAll("button")].find(button => button.textContent.includes("Gallery"));
+    gallery?.click();
+  };
 
-  const findVideo = output => {
-    const raw = output?.video || output?.videos || output?.gifs;
-    const item = Array.isArray(raw) ? raw[0] : raw;
-    if (!item) return null;
-    if (typeof item === "string") return { filename: item, subfolder: "", type: "output" };
-    return item;
+  let objectInfoCache = null;
+  const validateGraph = async graph => {
+    objectInfoCache ||= await (await api.fetchApi("/object_info")).json();
+    const missing = [...new Set(Object.values(graph).map(node => node.class_type))].filter(name => !objectInfoCache[name]);
+    if (missing.length) throw new Error(`Missing ComfyUI nodes: ${missing.join(", ")}`);
   };
-  const waitForVideo = (promptId, saveId) => new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => { cleanup(); reject(new Error("Video generation timed out")); }, 7200000);
-    const cleanup = () => {
-      clearTimeout(timeout); api.removeEventListener("executed", executed); api.removeEventListener("execution_error", failed);
-    };
+  const findAsset = (output, kind) => {
+    const keys = kind === "video" ? ["video", "videos", "gifs"] : ["audio", "audios"];
+    for (const key of keys) {
+      const raw = output?.[key];
+      const item = Array.isArray(raw) ? raw[0] : raw;
+      if (!item) continue;
+      return typeof item === "string" ? { filename: item, subfolder: "", type: "output" } : item;
+    }
+    return null;
+  };
+  const waitForAsset = (promptId, saveId, kind) => new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { cleanup(); reject(new Error(`${kind} generation timed out`)); }, 7200000);
+    const cleanup = () => { clearTimeout(timeout); api.removeEventListener("executed", executed); api.removeEventListener("execution_error", failed); };
     const executed = event => {
       const detail = event.detail || event;
       if (detail.prompt_id !== promptId || String(detail.node) !== saveId) return;
-      const media = findVideo(detail.output); if (!media) return;
-      cleanup(); resolve(media);
+      const asset = findAsset(detail.output, kind); if (!asset) return;
+      cleanup(); resolve(asset);
     };
-    const failed = event => {
-      const detail = event.detail || event; if (detail.prompt_id !== promptId) return;
-      cleanup(); reject(new Error(detail.exception_message || detail.exception_type || "Video generation failed"));
-    };
+    const failed = event => { const detail = event.detail || event; if (detail.prompt_id !== promptId) return; cleanup(); reject(new Error(detail.exception_message || detail.exception_type || `${kind} generation failed`)); };
     api.addEventListener("executed", executed); api.addEventListener("execution_error", failed);
   });
+  const queueGraph = async (graph, saveId, kind) => {
+    await validateGraph(graph);
+    const queued = await api.fetchApi("/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: api.clientId, extra_data: { enable_previews: true } }) });
+    const result = await queued.json();
+    if (!queued.ok || result.error || Object.keys(result.node_errors || {}).length) {
+      const firstError = Object.values(result.node_errors || {})[0];
+      throw new Error(result.error?.message || firstError?.errors?.[0]?.message || `Queue HTTP ${queued.status}`);
+    }
+    return waitForAsset(result.prompt_id, saveId, kind);
+  };
+  const importMedia = async asset => {
+    const response = await api.fetchApi("/flux_klein/import_media", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(asset) });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `Import HTTP ${response.status}`);
+    return result.name;
+  };
+  const maybeUnload = async () => {
+    if (!sharedState().unloadAfterGeneration) return;
+    await api.fetchApi("/free", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ unload_models: true, free_memory: true }) });
+  };
+  const useAudioInVideo = mode => {
+    if (!state.audioName) return;
+    persist(); openMode(mode); setStatus(videoStatus, `${state.audioLabel || "Generated audio"} selected`);
+  };
+  voiceToT2V.onclick = () => useAudioInVideo("t2v"); voiceToI2V.onclick = () => useAudioInVideo("i2v");
+  songToT2V.onclick = () => useAudioInVideo("t2v"); songToI2V.onclick = () => useAudioInVideo("i2v");
 
-  generateButton.onclick = async () => {
-    if (generateButton.disabled) return;
+  generateVideoButton.onclick = async () => {
+    if (generateVideoButton.disabled) return;
     state.prompt = promptTA.value.trim();
     state.width[state.mode] = clampInt(widthField.input.value, 256, 4096, state.width[state.mode]);
     state.height[state.mode] = clampInt(heightField.input.value, 256, 4096, state.height[state.mode]);
     state.fps = clampInt(fpsField.input.value, 1, 60, 24);
     state.duration = clampInt(durationField.input.value, 1, 120, 5);
     state.seed = clampInt(seedField.input.value, 0, 999999999999999, 0);
-    if (!state.prompt) { setStatus("Enter a video prompt", true); return; }
-    if (state.mode === "i2v" && !state.imageName) { setStatus("Choose a first frame", true); return; }
-    persist(); generateButton.disabled = true; generateButton.style.opacity = ".55";
+    if (!state.prompt) { setStatus(videoStatus, "Enter a video prompt", true); return; }
+    if (state.mode === "i2v" && !state.imageName) { setStatus(videoStatus, "Choose a first frame", true); return; }
+    persist(); generateVideoButton.disabled = true; generateVideoButton.style.opacity = ".55";
     try {
       let effectivePrompt = state.prompt;
       if (state.enhance[state.mode]) {
-        setStatus("Enhancing video prompt with LM Studio...");
-        const shared = sharedState(); const llm = shared.llmSettings || {};
-        const response = await api.fetchApi("/flux_klein/enhance_prompt", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: effectivePrompt, width: state.width[state.mode], height: state.height[state.mode], mode: state.mode, settings: {
-            base_url: llm.baseUrl, model: llm.model, temperature: llm.temperature, context_length: llm.contextLength,
-            max_tokens: llm.maxTokens, timeout_seconds: llm.timeoutSeconds, api_key: llm.apiKey || "lm-studio", system_prompt: llm.systemPrompt,
-          } }),
-        });
+        setStatus(videoStatus, "Enhancing video prompt with LM Studio...");
+        const llm = sharedState().llmSettings || {};
+        const response = await api.fetchApi("/flux_klein/enhance_prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: effectivePrompt, width: state.width[state.mode], height: state.height[state.mode], mode: state.mode, settings: { base_url: llm.baseUrl, model: llm.model, temperature: llm.temperature, context_length: llm.contextLength, max_tokens: llm.maxTokens, timeout_seconds: llm.timeoutSeconds, api_key: llm.apiKey || "lm-studio", system_prompt: llm.systemPrompt } }) });
         const result = await response.json();
         if (!response.ok || !result.ok || !result.json_prompt) throw new Error(result.error || `Enhance HTTP ${response.status}`);
         effectivePrompt = result.json_prompt; state.enhanced[state.mode] = effectivePrompt; persist(); refresh();
       }
-
-      setStatus("Preparing LTX workflow...");
-      const endpoint = state.mode === "t2v" ? "/flux_klein/workflow_ltx_t2v" : "/flux_klein/workflow_ltx_i2v";
-      const graphResponse = await api.fetchApi(endpoint); const graph = await graphResponse.json();
+      setStatus(videoStatus, "Preparing LTX workflow...");
       const prefix = state.mode === "t2v" ? "LTX:T2V" : "LTX:I2V";
-      const classes = new Set(Object.values(graph).map(node => node.class_type));
-      const objectInfo = await (await api.fetchApi("/object_info")).json();
-      const missing = [...classes].filter(name => !objectInfo[name]);
-      if (missing.length) throw new Error(`Missing ComfyUI nodes: ${missing.join(", ")}`);
-
+      const endpoint = state.mode === "t2v" ? "/flux_klein/workflow_ltx_t2v" : "/flux_klein/workflow_ltx_i2v";
+      const graph = await (await api.fetchApi(endpoint)).json();
       const width = Math.max(256, Math.round(state.width[state.mode] / 32) * 32);
       const height = Math.max(256, Math.round(state.height[state.mode] / 32) * 32);
       const frames = Math.max(9, Math.round((state.duration * state.fps - 1) / 8) * 8 + 1);
       const seed = state.seed || Math.floor(Math.random() * 9007199254740990) + 1;
       graph[`${prefix}:positive`].inputs.text = effectivePrompt;
-      graph[`${prefix}:size`]?.inputs && Object.assign(graph[`${prefix}:size`].inputs, { width, height });
-      if (state.mode === "i2v") {
-        graph[`${prefix}:load_image`].inputs.image = state.imageName;
-        Object.assign(graph[`${prefix}:resize`].inputs, { width, height });
-      }
+      if (graph[`${prefix}:size`]?.inputs) Object.assign(graph[`${prefix}:size`].inputs, { width, height });
+      if (state.mode === "i2v") { graph[`${prefix}:load_image`].inputs.image = state.imageName; Object.assign(graph[`${prefix}:resize`].inputs, { width, height }); }
       graph[`${prefix}:video_latent`].inputs.length = frames;
       graph[`${prefix}:audio_latent`].inputs.frames_number = frames;
       graph[`${prefix}:audio_latent`].inputs.frame_rate = state.fps;
@@ -323,36 +553,68 @@ function initVideoUI(root) {
       graph[`${prefix}:audio_vae`].inputs.vae_name = state.models.audioVae;
       graph[`${prefix}:upscaler`].inputs.model_name = state.models.upscaler;
       graph[`${prefix}:lora`].inputs.lora_name = state.mode === "t2v" ? state.models.t2vLora : state.models.i2vLora;
-      graph[`${prefix}:lora`].inputs.strength_model = 0.6;
-      if (state.audioName) {
-        graph["LTX:external_audio"] = { class_type: "LoadAudio", inputs: { audio: state.audioName }, _meta: { title: "External Audio" } };
-        graph[`${prefix}:create`].inputs.audio = ["LTX:external_audio", 0];
-      }
+      if (state.audioName) { graph["LTX:external_audio"] = { class_type: "LoadAudio", inputs: { audio: state.audioName }, _meta: { title: "External Audio" } }; graph[`${prefix}:create`].inputs.audio = ["LTX:external_audio", 0]; }
+      setStatus(videoStatus, "LTX video is generating...");
+      const asset = await queueGraph(graph, `${prefix}:save`, "video");
+      video.src = mediaUrl(asset); video.load(); videoMeta.textContent = asset.subfolder ? `${asset.subfolder}/${asset.filename}` : asset.filename;
+      setStatus(videoStatus, "Video ready"); await maybeUnload();
+    } catch (error) { setStatus(videoStatus, error?.message || String(error), true); }
+    finally { generateVideoButton.disabled = false; generateVideoButton.style.opacity = "1"; }
+  };
 
-      setStatus("LTX video is generating...");
-      const queued = await api.fetchApi("/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: api.clientId, extra_data: { enable_previews: true } }) });
-      const queueResult = await queued.json();
-      if (!queued.ok || queueResult.error || Object.keys(queueResult.node_errors || {}).length) {
-        const firstError = Object.values(queueResult.node_errors || {})[0];
-        throw new Error(queueResult.error?.message || firstError?.errors?.[0]?.message || `Queue HTTP ${queued.status}`);
-      }
-      const media = await waitForVideo(queueResult.prompt_id, `${prefix}:save`);
-      const url = api.apiURL(`/view?filename=${encodeURIComponent(media.filename)}&type=${encodeURIComponent(media.type || "output")}&subfolder=${encodeURIComponent(media.subfolder || "")}`);
-      video.src = url; video.load(); outputMeta.textContent = media.subfolder ? `${media.subfolder}/${media.filename}` : media.filename;
-      setStatus("Video ready");
-      if (sharedState().unloadAfterGeneration) {
-        await api.fetchApi("/free", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ unload_models: true, free_memory: true }) });
-      }
-    } catch (error) {
-      setStatus(error?.message || String(error), true);
-    } finally {
-      generateButton.disabled = false; generateButton.style.opacity = "1";
-    }
+  generateVoiceButton.onclick = async () => {
+    if (generateVoiceButton.disabled) return;
+    state.voice.text = voiceText.value.trim(); state.voice.refText = voiceRefText.value.trim();
+    state.voice.language = voiceLanguage.input.value; state.voice.seed = clampInt(voiceSeed.input.value, 1, 999999999999999, 42);
+    if (!state.voice.text) { setStatus(voiceStatus, "Enter text to speak", true); return; }
+    if (!state.voice.refAudioName) { setStatus(voiceStatus, "Choose reference voice audio", true); return; }
+    if (!state.voice.refText) { setStatus(voiceStatus, "Enter the exact reference transcript", true); return; }
+    persist(); generateVoiceButton.disabled = true; generateVoiceButton.style.opacity = ".55";
+    try {
+      setStatus(voiceStatus, "Generating cloned voice...");
+      const graph = await (await api.fetchApi("/flux_klein/workflow_clone_voice")).json();
+      Object.assign(graph["VOICE:model"].inputs, { repo_id: state.models.voiceRepo, source: state.models.voiceSource, precision: state.models.voicePrecision, attention: state.models.voiceAttention, local_model_path: state.models.voiceLocalPath });
+      graph["VOICE:reference"].inputs.audio = state.voice.refAudioName;
+      Object.assign(graph["VOICE:clone"].inputs, { text: state.voice.text, seed: state.voice.seed, language: state.voice.language, ref_text: state.voice.refText, max_new_tokens: clampInt(state.models.voiceMaxTokens, 64, 8192, 2048), ref_audio_max_seconds: clampFloat(state.models.voiceRefSeconds, -1, 120, 30) });
+      const asset = await queueGraph(graph, "VOICE:save", "audio");
+      voiceAudio.src = mediaUrl(asset); voiceAudio.load(); voiceMeta.textContent = asset.subfolder ? `${asset.subfolder}/${asset.filename}` : asset.filename;
+      state.audioName = await importMedia(asset); state.audioLabel = asset.filename; persist(); refresh();
+      setStatus(voiceStatus, "Voice ready and available for video"); await maybeUnload();
+    } catch (error) { setStatus(voiceStatus, error?.message || String(error), true); }
+    finally { generateVoiceButton.disabled = false; generateVoiceButton.style.opacity = "1"; }
+  };
+
+  generateSongButton.onclick = async () => {
+    if (generateSongButton.disabled) return;
+    state.song.tags = songTags.value.trim(); state.song.lyrics = songLyrics.value.trim();
+    state.song.duration = clampFloat(songDuration.input.value, 1, 1000, 180);
+    state.song.bpm = clampInt(songBpm.input.value, 10, 300, 120);
+    state.song.language = songLanguage.input.value.trim() || "de"; state.song.keyscale = songKey.input.value.trim() || "E minor";
+    state.song.timesignature = songTime.input.value; state.song.seed = clampInt(songSeed.input.value, 0, 999999999999999, 0);
+    if (!state.song.tags) { setStatus(songStatus, "Enter a music description", true); return; }
+    persist(); generateSongButton.disabled = true; generateSongButton.style.opacity = ".55";
+    try {
+      setStatus(songStatus, "Generating ACE-Step song...");
+      const graph = await (await api.fetchApi("/flux_klein/workflow_song")).json();
+      const seed = state.song.seed || Math.floor(Math.random() * 9007199254740990) + 1;
+      Object.assign(graph["SONG:model"].inputs, { unet_name: state.models.songUnet, weight_dtype: state.models.songWeightDtype });
+      Object.assign(graph["SONG:clip"].inputs, { clip_name1: state.models.songClip1, clip_name2: state.models.songClip2, device: state.models.songDevice });
+      graph["SONG:vae"].inputs.vae_name = state.models.songVae;
+      graph["SONG:latent"].inputs.seconds = state.song.duration;
+      Object.assign(graph["SONG:positive"].inputs, { tags: state.song.tags, lyrics: state.song.lyrics, seed, bpm: state.song.bpm, duration: state.song.duration, timesignature: state.song.timesignature, language: state.song.language, keyscale: state.song.keyscale, cfg_scale: clampFloat(state.models.songCfg, 0, 100, 2) });
+      graph["SONG:sampling"].inputs.shift = clampFloat(state.models.songShift, 0, 100, 3.5);
+      Object.assign(graph["SONG:sampler"].inputs, { seed, steps: clampInt(state.models.songSteps, 1, 10000, 50), cfg: clampFloat(state.models.songCfg, 0, 100, 2) });
+      const asset = await queueGraph(graph, "SONG:save", "audio");
+      songAudio.src = mediaUrl(asset); songAudio.load(); songMeta.textContent = asset.subfolder ? `${asset.subfolder}/${asset.filename}` : asset.filename;
+      state.audioName = await importMedia(asset); state.audioLabel = asset.filename; persist(); refresh();
+      setStatus(songStatus, "Song ready and available for video"); await maybeUnload();
+    } catch (error) { setStatus(songStatus, error?.message || String(error), true); }
+    finally { generateSongButton.disabled = false; generateSongButton.style.opacity = "1"; }
   };
 
   refresh();
 }
 
-const scan = () => document.querySelectorAll(".fk-root").forEach(initVideoUI);
+const scan = () => document.querySelectorAll(".fk-root").forEach(initMediaUI);
 scan();
 new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });

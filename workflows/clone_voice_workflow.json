@@ -1,0 +1,41 @@
+{
+  "VOICE:model": {
+    "class_type": "Qwen3Loader",
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "source": "HuggingFace",
+      "precision": "bf16",
+      "attention": "auto",
+      "local_model_path": ""
+    },
+    "_meta": {"title": "Load Qwen3 TTS"}
+  },
+  "VOICE:reference": {
+    "class_type": "LoadAudio",
+    "inputs": {"audio": ""},
+    "_meta": {"title": "Reference Voice"}
+  },
+  "VOICE:clone": {
+    "class_type": "Qwen3VoiceClone",
+    "inputs": {
+      "model": ["VOICE:model", 0],
+      "text": "",
+      "seed": 42,
+      "language": "Auto",
+      "ref_audio": ["VOICE:reference", 0],
+      "ref_text": "",
+      "max_new_tokens": 2048,
+      "ref_audio_max_seconds": 30.0
+    },
+    "_meta": {"title": "Clone Voice"}
+  },
+  "VOICE:save": {
+    "class_type": "SaveAudioMP3",
+    "inputs": {
+      "audio": ["VOICE:clone", 0],
+      "filename_prefix": "audio/OneNode_CloneVoice",
+      "quality": "320k"
+    },
+    "_meta": {"title": "Save Cloned Voice"}
+  }
+}

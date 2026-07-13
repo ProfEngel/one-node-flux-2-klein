@@ -27,7 +27,7 @@ The node has been updated since the tutorial was recorded - check the [Changelog
 
 ## What it does
 
-The node has 8 modes, switchable with a single click:
+The node has 10 modes, switchable with a single click:
 
 **T2I** - standard text to image generation.
 
@@ -46,7 +46,11 @@ The node has 8 modes, switchable with a single click:
 
 **T2V** - generate an LTX 2.3 video with generated audio from a text prompt.
 
-**I2V** - animate an uploaded first frame with LTX 2.3 while preserving its visual identity and composition.
+**I2V** - animate an uploaded or Gallery-selected first frame with LTX 2.3 while preserving its visual identity and composition.
+
+**CloneVoice** - clone a reference voice with Qwen3-TTS and generate reusable speech audio.
+
+**Song** - generate a complete song from music tags and lyrics with ACE-Step 1.5.
 
 ### Enhancements in this fork
 
@@ -57,6 +61,8 @@ The node has 8 modes, switchable with a single click:
 - Optional model unloading after each completed generation.
 - A full-screen WebUI at `/one-node`, without the normal ComfyUI canvas and toolbars.
 - Integrated LTX 2.3 T2V and I2V panels with two-pass sampling, spatial latent upscaling, generated or external audio, and video preview.
+- Integrated Qwen3 CloneVoice and ACE-Step Song panels with audio preview and direct T2V/I2V handoff.
+- Gallery and image-preview actions can send any generated image directly to the I2V first-frame slot.
 - LLM connection data is stored in the browser. This repository contains no personal server address, model name, or API key.
 
 ---
@@ -119,7 +125,7 @@ Enable **Unload** when ComfyUI should release loaded models and GPU memory after
 
 T2V and I2V appear beside Pose in the OneNode header. Their **Models** panel contains all model filenames and stores changes locally in the browser. The public defaults match the supplied LTX 2.3 GGUF workflows but can be changed without editing workflow JSON.
 
-Both modes expose output size, frame rate, duration, and seed. A seed of `0` generates a random seed. Frame counts are adjusted to the temporal layout required by LTX. I2V requires a first-frame image. Optional audio replaces the model-generated soundtrack in the final video container.
+Both modes expose output size, frame rate, duration, and seed. A seed of `0` generates a random seed. Frame counts are adjusted to the temporal layout required by LTX. I2V requires a first-frame image, which can be uploaded, selected from Gallery, or sent from the current image preview. Optional audio replaces the model-generated soundtrack in the final video container.
 
 Prompt Enhance uses a dedicated LTX JSON schema with shot, motion, camera, lighting, audio, continuity, and avoid fields. **Review JSON** displays the latest enhanced prompt, and **Use without Enhance** reuses it without another LLM request.
 
@@ -138,6 +144,24 @@ The default model filenames are:
 - Spatial upscaler: `ltx-2.3-spatial-upscaler-x2-1.0.safetensors`
 - T2V LoRA: `ltx2.3/ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors`
 - I2V LoRA: `ltx2.3/ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors`
+
+### CloneVoice
+
+CloneVoice uses [ComfyUI-Qwen3-TTS](https://github.com/DarioFT/ComfyUI-Qwen3-TTS). Enter the text to speak, upload a clean reference recording, and provide the exact transcript of that recording. The default model is `Qwen/Qwen3-TTS-12Hz-1.7B-Base`; it can be loaded from HuggingFace or from a local model path configured in Media Models.
+
+Every generated voice is saved as MP3, previewed in OneNode, copied into ComfyUI input storage, and made immediately available through **Use in T2V** and **Use in I2V**.
+
+### Song
+
+Song uses ComfyUI's ACE-Step 1.5 nodes. It provides separate fields for music description and lyrics, plus duration, BPM, language, key, time signature, and seed. The default model files are:
+
+- Diffusion model: `acestep_v1.5_xl_turbo_bf16.safetensors`
+- Text encoders: `qwen_0.6b_ace15.safetensors` and `qwen_1.7b_ace15.safetensors`
+- VAE: `ace_1.5_vae.safetensors`
+
+The files are available from [Comfy-Org/ace_step_1.5_ComfyUI_files](https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files). Generated songs are saved as MP3 and can be passed directly to either video mode.
+
+The top-level **Settings** button opens context-specific Media Models while T2V, I2V, CloneVoice, or Song is active. The media Help page and the main Help page list the required filenames and download locations.
 
 ---
 

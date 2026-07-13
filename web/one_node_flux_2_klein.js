@@ -1596,6 +1596,15 @@ app.registerExtension({
         _mkModelRow("BG Removal","models/background_removal/",[
           {name:"birefnet",url:"https://huggingface.co/Comfy-Org/BiRefNet/resolve/main/background_removal/birefnet.safetensors"},
         ]),
+        _mkModelRow("LTX 2.3 Video","models/diffusion_models/ + vae/ + text_encoders/",[
+          {name:"LTX-2.3 model files",url:"https://huggingface.co/Lightricks/LTX-2.3"},
+        ],"T2V and I2V also use an LTX LoRA and latent upscaler"),
+        _mkModelRow("Qwen3 CloneVoice","HuggingFace cache or local model path",[
+          {name:"Qwen3-TTS-12Hz-1.7B-Base",url:"https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base"},
+        ]),
+        _mkModelRow("ACE-Step Song","models/diffusion_models/ + text_encoders/ + vae/",[
+          {name:"ACE-Step 1.5 ComfyUI files",url:"https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files"},
+        ],"acestep_v1.5_xl_turbo_bf16, qwen_0.6b_ace15, qwen_1.7b_ace15, ace_1.5_vae"),
       );
 
       // ── Bottom row: Official Links (left) + My channels (right) ─────────
@@ -1650,7 +1659,10 @@ app.registerExtension({
 
       helpOverlay.append(helpHdr,modelsSectionTitle,gatedWarn,modelsList,bottomRow);
 
-      tipsBtn.onclick=()=>openOverlay(helpOverlay);
+      tipsBtn.onclick=()=>{
+        window.dispatchEvent(new CustomEvent("one-node:main-overlay-open",{detail:{name:"help"}}));
+        openOverlay(helpOverlay);
+      };
 
       // Settings button
       const settingsBtn=mk("button",{
@@ -1684,7 +1696,13 @@ app.registerExtension({
         dim(teF.wrap,  isActive("clip"));
         dim(vaeF.wrap, isActive("vae"));
       };
-      settingsBtn.onclick=e=>{e.stopPropagation();_refreshExtInputUI();openOverlay(settingsOverlay);};
+      settingsBtn.onclick=e=>{
+        e.stopPropagation();
+        const request=new CustomEvent("one-node:settings-request",{cancelable:true,detail:{source:"main"}});
+        if(!window.dispatchEvent(request)) return;
+        window.dispatchEvent(new CustomEvent("one-node:main-overlay-open",{detail:{name:"settings"}}));
+        _refreshExtInputUI();openOverlay(settingsOverlay);
+      };
       settClose.onclick=()=>closeOverlayFade(settingsOverlay);
 
       // ── Layout toggle (classic wide-prompt ↔ tall preview) ────────────────
@@ -7098,6 +7116,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _mkPUSection("Pose"),
         _mkPUItem("Pose","◇",()=>_puUpload(n=>{setPill("pose");S.poseImage=n;_poseImgSlot._restorePreview(n);persist();})),
         _mkPUItem("Reference","◈",()=>_puUpload(n=>{setPill("pose");S.poseRef=n;_poseRefSlot._restorePreview(n);persist();})),
+        _mkPUDivider(),
+        _mkPUSection("Video"),
+        _mkPUItem("I2V first frame","▶",()=>{const v=_getLastSrc();if(v)_sendImageToI2V(v);}),
       );
 
       let _puDropOpen=false;
@@ -10049,6 +10070,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _mkGalCtxSec("Pose"),
         _mkGalCtxItem("Pose","◇",()=>{ if(_galCtxImg)_loadIntoPoseSlot(_galCtxImg,"pose"); }),
         _mkGalCtxItem("Reference","◈",()=>{ if(_galCtxImg)_loadIntoPoseSlot(_galCtxImg,"ref"); }),
+        _mkGalCtxDiv(),
+        _mkGalCtxSec("Video"),
+        _mkGalCtxItem("I2V first frame","▶",()=>{ if(_galCtxImg)_sendImageToI2V(_galCtxImg); }),
       );
       document.body.appendChild(_galCtxMenu);
       document.addEventListener("click",()=>{ _galCtxMenu.style.display="none"; });
@@ -10416,6 +10440,9 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         _mkDropSection("Pose"),
         _mkDropItem("Pose","◇",()=>{ const v=_lbActiveImg;if(v)_loadIntoPoseSlot(v,"pose"); }),
         _mkDropItem("Reference","◈",()=>{ const v=_lbActiveImg;if(v)_loadIntoPoseSlot(v,"ref"); }),
+        _mkDropDivider(),
+        _mkDropSection("Video"),
+        _mkDropItem("I2V first frame","▶",()=>{ const v=_lbActiveImg;if(v)_sendImageToI2V(v); }),
       );
 
       let _lbDropOpen=false;
@@ -10796,6 +10823,19 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         return upd.name||v.filename;
       };
 
+      const _sendImageToI2V=async(v)=>{
+        if(!v||!v.filename) return;
+        try{
+          const inputName=await _uploadOutputToInput(v);
+          window.dispatchEvent(new CustomEvent("one-node:media-handoff",{detail:{
+            kind:"image",target:"i2v",name:inputName,
+            asset:{filename:inputName,subfolder:"",type:"input"},
+          }}));
+          lightbox.style.display="none";_lbActiveImg=null;
+          closeOverlayFade(galleryOverlay);
+        }catch(err){ console.warn("[FluxKlein] send-to-i2v:",err); }
+      };
+
       // Loads a gallery output image into Image 1 slot and switches to EDIT. Does not touch the preview box.
       const _lbLoadIntoUI=async(v)=>{
         if(activePill!=="edit") setPill("edit");
@@ -11020,6 +11060,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       galClose.onclick=()=>closeOverlayFade(galleryOverlay,()=>{ lightbox.style.display="none"; _lbActiveImg=null; });
       galleryBtn.onclick=e=>{
         e.stopPropagation();
+        window.dispatchEvent(new CustomEvent("one-node:main-overlay-open",{detail:{name:"gallery"}}));
         openOverlay(galleryOverlay);
         if(_galNeedsRefresh||_galImages.length===0){ galLoad(true); _galNeedsRefresh=false; }
       };

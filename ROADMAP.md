@@ -1,14 +1,14 @@
 # Multimedia Roadmap
 
-The image modes remain the stable core of this fork. The following modes were evaluated from a larger local ComfyUI workflow but are not included in the first public release:
+The image modes remain the stable core of this fork. The multimedia modes below are now integrated into the full-screen interface.
 
 ## CloneVoice
 
-Planned around `Qwen3Loader`, `Qwen3VoiceClone`, `LoadAudio`, and `SaveAudioMP3` from ComfyUI-Qwen3-TTS. A portable UI needs spoken text, a reference recording, its transcript, language, seed, and model controls. Spoken text must not be rewritten by the image prompt enhancer.
+Implemented with `Qwen3Loader`, `Qwen3VoiceClone`, `LoadAudio`, and `SaveAudioMP3` from ComfyUI-Qwen3-TTS. The UI includes spoken text, reference recording, exact transcript, language, seed, and model controls. Generated speech can be sent directly to T2V or I2V.
 
 ## Song
 
-Planned around the ComfyUI-native ACE-Step 1.5 nodes. A portable UI needs separate tags and lyrics fields plus duration, BPM, time signature, language, key, seed, and model selection. The source workflow used frontend group nodes, so the public implementation must use normal executable nodes instead.
+Implemented with normal executable ACE-Step 1.5 nodes rather than frontend subgraphs. The UI includes separate tags and lyrics fields plus duration, BPM, time signature, language, key, seed, and model selection. Generated songs can be sent directly to T2V or I2V.
 
 ## Text2Video and Image2Video
 

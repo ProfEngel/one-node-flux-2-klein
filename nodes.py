@@ -946,6 +946,8 @@ PromptServer.instance.routes.get("/flux_klein/workflow_pose")(_serve_json("workf
 PromptServer.instance.routes.get("/flux_klein/workflow_remove_bg")(_serve_json("workflows/remove_bg_workflow.json"))
 PromptServer.instance.routes.get("/flux_klein/workflow_ltx_t2v")(_serve_json("workflows/ltx_t2v_workflow.json"))
 PromptServer.instance.routes.get("/flux_klein/workflow_ltx_i2v")(_serve_json("workflows/ltx_i2v_workflow.json"))
+PromptServer.instance.routes.get("/flux_klein/workflow_clone_voice")(_serve_json("workflows/clone_voice_workflow.json"))
+PromptServer.instance.routes.get("/flux_klein/workflow_song")(_serve_json("workflows/song_workflow.json"))
 
 
 @PromptServer.instance.routes.get("/flux_klein/bgremoval_models")
@@ -1482,6 +1484,43 @@ async def set_output(request):
         else:
             _last_output_by_node.pop(node_id, None)
         return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post("/flux_klein/import_media")
+async def import_media(request):
+    """Copy a generated image or audio file into ComfyUI input storage.
+
+    LoadImage and LoadAudio intentionally read from the input directory. This
+    small bridge lets Gallery images and freshly generated audio become inputs
+    for I2V or another media mode without a download/upload round trip.
+    """
+    try:
+        data = await request.json()
+        filename = str(data.get("filename", "")).strip()
+        subfolder = str(data.get("subfolder", "")).strip()
+        source_type = str(data.get("type", "output")).strip() or "output"
+        source = _resolve_image_file(filename, subfolder, source_type)
+        if not source:
+            return web.json_response({"ok": False, "error": "media file not found"}, status=404)
+
+        safe_name = Path(filename).name
+        if not safe_name:
+            return web.json_response({"ok": False, "error": "invalid filename"}, status=400)
+        target_dir = (Path(folder_paths.get_input_directory()).resolve() / "one_node_media")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = (target_dir / safe_name).resolve()
+        target.relative_to(target_dir)
+        if Path(source).resolve() != target:
+            shutil.copy2(source, target)
+        return web.json_response({
+            "ok": True,
+            "name": f"one_node_media/{safe_name}",
+            "filename": safe_name,
+            "subfolder": "one_node_media",
+            "type": "input",
+        })
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 

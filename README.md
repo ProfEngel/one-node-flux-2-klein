@@ -149,11 +149,15 @@ The default model filenames are:
 
 CloneVoice uses [ComfyUI-Qwen3-TTS](https://github.com/DarioFT/ComfyUI-Qwen3-TTS). Enter the text to speak, upload a clean reference recording, and provide the exact transcript of that recording. The default model is `Qwen/Qwen3-TTS-12Hz-1.7B-Base`; it can be loaded from HuggingFace or from a local model path configured in Media Models.
 
+Reference voices can be saved as named templates. A template stores the uploaded reference-audio location together with its exact transcript, so voices such as `Sierra` or `Mathias` can be selected again without re-entering the sample text. Voice templates are stored in ComfyUI's user configuration folder and survive Custom Node updates. The text to be spoken remains independent and is entered after selecting a template.
+
 Every generated voice is saved as MP3, previewed in OneNode, copied into ComfyUI input storage, and made immediately available through **Use in T2V** and **Use in I2V**.
 
 ### Song
 
 Song uses ComfyUI's ACE-Step 1.5 nodes. It provides separate fields for music description and lyrics, plus duration, BPM, language, key, time signature, and seed. The default model files are:
+
+Music description and lyrics each have their own **Enhance** action. Enter keywords or a rough draft, run the desired enhancement through the configured local LLM, and review or edit the returned text directly in the same field. **Generate song** is a separate action and never starts automatically after enhancement.
 
 - Diffusion model: `acestep_v1.5_xl_turbo_bf16.safetensors`
 - Text encoders: `qwen_0.6b_ace15.safetensors` and `qwen_1.7b_ace15.safetensors`

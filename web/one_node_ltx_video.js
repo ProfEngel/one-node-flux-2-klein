@@ -103,6 +103,15 @@ function initMediaUI(root) {
   state.models = { ...DEFAULT_STATE.models, ...(state.models || {}) };
   const persist = () => localStorage.setItem(MEDIA_STATE_KEY, JSON.stringify(state));
   const sharedState = () => readJson(IMAGE_STATE_KEY, {});
+  const llmSettingsPayload = () => {
+    const llm = sharedState().llmSettings || {};
+    return {
+      base_url: llm.baseUrl, model: llm.model, temperature: llm.temperature,
+      context_length: llm.contextLength, max_tokens: llm.maxTokens,
+      timeout_seconds: llm.timeoutSeconds, api_key: llm.apiKey || "lm-studio",
+      system_prompt: llm.systemPrompt,
+    };
+  };
 
   const modeBar = poseButton.parentElement;
   modeBar.style.overflowX = "auto";
@@ -236,12 +245,20 @@ function initMediaUI(root) {
 
   // CloneVoice panel
   const voicePanel = el("div", { display: "none", gridTemplateColumns: "420px minmax(0,1fr)", gap: "12px", height: "100%" });
-  const voiceControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflow: "hidden" });
+  const voiceControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflowY: "auto", paddingRight: "3px" });
   const voiceModelsButton = smallButton("Models");
   const voiceHelpButton = smallButton("Help");
   voiceControls.append(panelHeader("Qwen3 TTS - CloneVoice", [voiceHelpButton, voiceModelsButton]));
   const voiceText = textarea(state.voice.text, "Text to speak with the cloned voice...", "105px");
   const voiceRefText = textarea(state.voice.refText, "Exact transcript of the reference audio...", "72px");
+  const voiceTemplateRow = el("div", { display: "grid", gridTemplateColumns: "minmax(100px,1fr) minmax(90px,1fr) auto auto", gap: "5px", alignItems: "end" });
+  const voiceTemplateSelectField = selectField("Voice template", "", []);
+  const voiceTemplateName = textField("Template name", "", "e.g. Sierra or Mathias");
+  const saveVoiceTemplateButton = smallButton("Save");
+  const deleteVoiceTemplateButton = smallButton("Delete");
+  Object.assign(saveVoiceTemplateButton.style, { height: "27px" });
+  Object.assign(deleteVoiceTemplateButton.style, { height: "27px" });
+  voiceTemplateRow.append(voiceTemplateSelectField.wrap, voiceTemplateName.wrap, saveVoiceTemplateButton, deleteVoiceTemplateButton);
   const voiceFields = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" });
   const voiceLanguage = selectField("Language", state.voice.language, ["Auto", "German", "English", "French", "Spanish", "Italian", "Portuguese", "Chinese", "Japanese", "Korean", "Russian"]);
   const voiceSeed = numberField("Seed", state.voice.seed, 1, 999999999999999);
@@ -249,7 +266,7 @@ function initMediaUI(root) {
   const refAudioFile = fileControl("Reference voice audio", "audio/*");
   const generateVoiceButton = primaryButton("Generate voice");
   const voiceStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
-  voiceControls.append(tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Spoken text"), voiceText, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Reference transcript"), voiceRefText, voiceFields, refAudioFile.wrap, generateVoiceButton, voiceStatus);
+  voiceControls.append(voiceTemplateRow, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Spoken text"), voiceText, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Reference transcript"), voiceRefText, voiceFields, refAudioFile.wrap, generateVoiceButton, voiceStatus);
   const voicePreview = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
   const voiceAudio = el("audio", { width: "100%" }, { controls: true });
   const voiceMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated voice will appear here");
@@ -261,11 +278,17 @@ function initMediaUI(root) {
 
   // Song panel
   const songPanel = el("div", { display: "none", gridTemplateColumns: "430px minmax(0,1fr)", gap: "12px", height: "100%" });
-  const songControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflow: "hidden" });
+  const songControls = el("div", { display: "flex", flexDirection: "column", gap: "7px", minWidth: "0", overflowY: "auto", paddingRight: "3px" });
   const songModelsButton = smallButton("Models"); const songHelpButton = smallButton("Help");
   songControls.append(panelHeader("ACE-Step 1.5 - Song", [songHelpButton, songModelsButton]));
   const songTags = textarea(state.song.tags, "Style, genre, instruments, mood, vocals...", "62px");
   const songLyrics = textarea(state.song.lyrics, "Lyrics with optional [Verse], [Chorus] and [Bridge] sections...", "105px");
+  const songTagsHeader = el("div", { display: "flex", alignItems: "center", gap: "6px" });
+  const songLyricsHeader = el("div", { display: "flex", alignItems: "center", gap: "6px" });
+  const songTagsEnhance = smallButton("Enhance");
+  const songLyricsEnhance = smallButton("Enhance");
+  songTagsHeader.append(tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase", flex: "1" }), "Music description"), songTagsEnhance);
+  songLyricsHeader.append(tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase", flex: "1" }), "Lyrics"), songLyricsEnhance);
   const songFields = el("div", { display: "grid", gridTemplateColumns: "repeat(6,minmax(0,1fr))", gap: "5px" });
   const songDuration = numberField("Seconds", state.song.duration, 1, 1000, 0.1);
   const songBpm = numberField("BPM", state.song.bpm, 10, 300);
@@ -276,7 +299,7 @@ function initMediaUI(root) {
   songFields.append(songDuration.wrap, songBpm.wrap, songLanguage.wrap, songKey.wrap, songTime.wrap, songSeed.wrap);
   const generateSongButton = primaryButton("Generate song");
   const songStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
-  songControls.append(tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Music description"), songTags, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Lyrics"), songLyrics, songFields, generateSongButton, songStatus);
+  songControls.append(songTagsHeader, songTags, songLyricsHeader, songLyrics, songFields, generateSongButton, songStatus);
   const songPreview = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
   const songAudio = el("audio", { width: "100%" }, { controls: true });
   const songMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated song will appear here");
@@ -355,6 +378,37 @@ function initMediaUI(root) {
   helpOverlay.append(helpHead, helpBody); overlay.append(helpOverlay);
 
   const setStatus = (node, message, error = false) => { node.textContent = message; node.style.color = error ? "#ff6b6b" : "#888"; };
+  let voiceTemplates = [];
+  const renderVoiceTemplates = (selectedName = voiceTemplateSelectField.input.value) => {
+    voiceTemplateSelectField.input.replaceChildren(tx(el("option", {}, { value: "" }), "Choose template..."));
+    for (const template of voiceTemplates) {
+      voiceTemplateSelectField.input.append(tx(el("option", {}, { value: template.name }), template.name));
+    }
+    voiceTemplateSelectField.input.value = voiceTemplates.some(item => item.name === selectedName) ? selectedName : "";
+    deleteVoiceTemplateButton.disabled = !voiceTemplateSelectField.input.value;
+    deleteVoiceTemplateButton.style.opacity = voiceTemplateSelectField.input.value ? "1" : ".4";
+  };
+  const loadVoiceTemplates = async () => {
+    try {
+      const response = await api.fetchApi("/flux_klein/config");
+      const config = await response.json();
+      voiceTemplates = Array.isArray(config.voice_templates)
+        ? config.voice_templates.filter(item => item && typeof item.name === "string" && item.name.trim())
+        : [];
+      renderVoiceTemplates();
+    } catch (error) {
+      setStatus(voiceStatus, `Could not load voice templates: ${error.message}`, true);
+    }
+  };
+  const storeVoiceTemplates = async selectedName => {
+    const response = await api.fetchApi("/flux_klein/config", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voice_templates: voiceTemplates }),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `Template save HTTP ${response.status}`);
+    renderVoiceTemplates(selectedName);
+  };
   const refresh = () => {
     const active = overlay.style.display !== "none";
     for (const [mode, pill] of Object.entries(pills)) {
@@ -397,6 +451,37 @@ function initMediaUI(root) {
   closeSettings.onclick = () => { settingsOverlay.style.display = "none"; };
   closeHelp.onclick = () => { helpOverlay.style.display = "none"; };
 
+  voiceTemplateSelectField.input.onchange = () => {
+    const template = voiceTemplates.find(item => item.name === voiceTemplateSelectField.input.value);
+    if (!template) { voiceTemplateName.input.value = ""; renderVoiceTemplates(); return; }
+    voiceTemplateName.input.value = template.name;
+    state.voice.refText = String(template.refText || "");
+    state.voice.refAudioName = String(template.refAudioName || "");
+    state.voice.refAudioLabel = String(template.refAudioLabel || template.refAudioName || "");
+    voiceRefText.value = state.voice.refText;
+    persist(); refresh(); setStatus(voiceStatus, `Voice template "${template.name}" loaded`);
+  };
+  saveVoiceTemplateButton.onclick = async () => {
+    const name = voiceTemplateName.input.value.trim();
+    state.voice.refText = voiceRefText.value.trim();
+    if (!name) { setStatus(voiceStatus, "Enter a template name", true); return; }
+    if (!state.voice.refAudioName) { setStatus(voiceStatus, "Upload reference voice audio first", true); return; }
+    if (!state.voice.refText) { setStatus(voiceStatus, "Enter the exact reference transcript first", true); return; }
+    const template = { name, refText: state.voice.refText, refAudioName: state.voice.refAudioName, refAudioLabel: state.voice.refAudioLabel };
+    const index = voiceTemplates.findIndex(item => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (index >= 0) voiceTemplates[index] = template; else voiceTemplates.push(template);
+    voiceTemplates.sort((a, b) => a.name.localeCompare(b.name));
+    try { await storeVoiceTemplates(name); persist(); setStatus(voiceStatus, `Voice template "${name}" saved`); }
+    catch (error) { setStatus(voiceStatus, error.message, true); }
+  };
+  deleteVoiceTemplateButton.onclick = async () => {
+    const name = voiceTemplateSelectField.input.value;
+    if (!name || !window.confirm(`Delete voice template "${name}"?`)) return;
+    voiceTemplates = voiceTemplates.filter(item => item.name !== name);
+    try { await storeVoiceTemplates(""); voiceTemplateName.input.value = ""; setStatus(voiceStatus, `Voice template "${name}" deleted`); }
+    catch (error) { setStatus(voiceStatus, error.message, true); }
+  };
+
   window.addEventListener("one-node:settings-request", event => {
     if (overlay.style.display === "none") return;
     event.preventDefault(); openSettings();
@@ -421,6 +506,41 @@ function initMediaUI(root) {
     state.enhanced[state.mode] = value; state.prompt = value; state.enhance[state.mode] = false;
     promptTA.value = value; jsonPanel.style.display = "none"; promptTA.style.display = "block"; persist(); refresh();
   };
+
+  const enhanceSongField = async (mode, input, button) => {
+    const prompt = input.value.trim();
+    if (!prompt) { setStatus(songStatus, mode === "song_lyrics" ? "Enter lyrics or lyric ideas first" : "Enter a music description first", true); return; }
+    if (button.disabled) return;
+    const originalLabel = button.textContent;
+    button.disabled = true; button.style.opacity = ".55"; button.textContent = "Enhancing...";
+    try {
+      setStatus(songStatus, mode === "song_lyrics" ? "Enhancing lyrics with LM Studio..." : "Enhancing music description with LM Studio...");
+      const response = await api.fetchApi("/flux_klein/enhance_prompt", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt, mode, width: 1024, height: 1024, settings: llmSettingsPayload(),
+          context: {
+            duration_seconds: clampFloat(songDuration.input.value, 1, 1000, 180),
+            bpm: clampInt(songBpm.input.value, 10, 300, 120),
+            language: songLanguage.input.value.trim() || "de",
+            key: songKey.input.value.trim() || "E minor",
+            time_signature: songTime.input.value,
+          },
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok || !result.json_prompt) throw new Error(result.error || `Enhance HTTP ${response.status}`);
+      const parsed = JSON.parse(result.json_prompt);
+      const enhanced = String((mode === "song_lyrics" ? parsed.lyrics : parsed.music_description) || "").trim();
+      if (!enhanced) throw new Error("LM Studio returned an empty enhanced text");
+      input.value = enhanced;
+      if (mode === "song_lyrics") state.song.lyrics = enhanced; else state.song.tags = enhanced;
+      persist(); setStatus(songStatus, "Enhanced text ready - edit it if needed, then generate the song");
+    } catch (error) { setStatus(songStatus, error?.message || String(error), true); }
+    finally { button.disabled = false; button.style.opacity = "1"; button.textContent = originalLabel; }
+  };
+  songTagsEnhance.onclick = () => enhanceSongField("song_description", songTags, songTagsEnhance);
+  songLyricsEnhance.onclick = () => enhanceSongField("song_lyrics", songLyrics, songLyricsEnhance);
 
   const upload = async file => {
     const form = new FormData(); form.append("image", file, file.name); form.append("type", "input"); form.append("overwrite", "true");
@@ -522,8 +642,7 @@ function initMediaUI(root) {
       let effectivePrompt = state.prompt;
       if (state.enhance[state.mode]) {
         setStatus(videoStatus, "Enhancing video prompt with LM Studio...");
-        const llm = sharedState().llmSettings || {};
-        const response = await api.fetchApi("/flux_klein/enhance_prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: effectivePrompt, width: state.width[state.mode], height: state.height[state.mode], mode: state.mode, settings: { base_url: llm.baseUrl, model: llm.model, temperature: llm.temperature, context_length: llm.contextLength, max_tokens: llm.maxTokens, timeout_seconds: llm.timeoutSeconds, api_key: llm.apiKey || "lm-studio", system_prompt: llm.systemPrompt } }) });
+        const response = await api.fetchApi("/flux_klein/enhance_prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: effectivePrompt, width: state.width[state.mode], height: state.height[state.mode], mode: state.mode, settings: llmSettingsPayload() }) });
         const result = await response.json();
         if (!response.ok || !result.ok || !result.json_prompt) throw new Error(result.error || `Enhance HTTP ${response.status}`);
         effectivePrompt = result.json_prompt; state.enhanced[state.mode] = effectivePrompt; persist(); refresh();
@@ -612,6 +731,7 @@ function initMediaUI(root) {
     finally { generateSongButton.disabled = false; generateSongButton.style.opacity = "1"; }
   };
 
+  loadVoiceTemplates();
   refresh();
 }
 

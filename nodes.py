@@ -79,6 +79,14 @@ LLM_MODE_INSTRUCTIONS = {
         "The uploaded image is the authoritative first frame for an LTX 2.3 video. Preserve its subjects, identities, composition, "
         "perspective, clothing, lighting, and environment while describing only plausible motion and temporal development from that frame."
     ),
+    "song_description": (
+        "Expand the user's notes into a production-ready ACE-Step music description. Specify genre, mood, instrumentation, rhythm, "
+        "vocal character, arrangement, dynamics, and production style. Preserve every explicit request and do not write lyrics."
+    ),
+    "song_lyrics": (
+        "Turn the user's notes or draft into complete, singable lyrics. Preserve the requested language, topic, perspective, names, "
+        "and phrases. Use clear section markers such as [Verse], [Chorus], [Bridge], and [Outro] where appropriate."
+    ),
 }
 
 LLM_PROMPT_SCHEMA = {
@@ -128,6 +136,20 @@ LLM_VIDEO_PROMPT_SCHEMA = {
         "avoid": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["positive_prompt", "shot", "motion", "camera", "lighting", "audio", "continuity", "avoid"],
+    "additionalProperties": False,
+}
+
+LLM_SONG_DESCRIPTION_SCHEMA = {
+    "type": "object",
+    "properties": {"music_description": {"type": "string"}},
+    "required": ["music_description"],
+    "additionalProperties": False,
+}
+
+LLM_SONG_LYRICS_SCHEMA = {
+    "type": "object",
+    "properties": {"lyrics": {"type": "string"}},
+    "required": ["lyrics"],
     "additionalProperties": False,
 }
 
@@ -749,7 +771,7 @@ def _llm_schema_format(name, schema=LLM_PROMPT_SCHEMA):
     }
 
 
-def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operation=""):
+def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operation="", context=None):
     cfg = dict(LLM_DEFAULTS)
     if isinstance(settings, dict):
         cfg.update({key: value for key, value in settings.items() if value is not None})
@@ -767,21 +789,45 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
     operation = str(operation or "").strip().lower()
     effective_mode = operation if mode == "inpaint" and operation in {"inpaint", "outpaint"} else mode
     mode_instruction = LLM_MODE_INSTRUCTIONS.get(effective_mode, LLM_MODE_INSTRUCTIONS["t2i"])
-    response_schema = LLM_VIDEO_PROMPT_SCHEMA if effective_mode in {"t2v", "i2v"} else LLM_PROMPT_SCHEMA
+    song_mode = effective_mode in {"song_description", "song_lyrics"}
+    if effective_mode == "song_description":
+        response_schema = LLM_SONG_DESCRIPTION_SCHEMA
+    elif effective_mode == "song_lyrics":
+        response_schema = LLM_SONG_LYRICS_SCHEMA
+    elif effective_mode in {"t2v", "i2v"}:
+        response_schema = LLM_VIDEO_PROMPT_SCHEMA
+    else:
+        response_schema = LLM_PROMPT_SCHEMA
     if effective_mode in {"t2v", "i2v"}:
         system_prompt += (
             "\n\nACTIVE VIDEO MODE: Write for LTX 2.3 video generation. The video response schema supersedes "
             "image-only composition or bounding-box requirements in the editable instructions above."
         )
+    elif song_mode:
+        system_prompt += (
+            "\n\nACTIVE SONG MODE: Write for ACE-Step 1.5 song generation. The song response schema and song mode "
+            "contract supersede every image, canvas, camera, composition, bounding-box, and JSON prompt requirement above."
+        )
 
-    user_message = (
-        f"Canvas: {width} x {height} pixels. Origin: top-left.\n"
-        f"OneNode mode: {effective_mode}.\n"
-        f"Mode contract: {mode_instruction}\n"
-        "The user may provide only keywords. Expand them into a complete instruction while obeying the mode contract. "
-        "Preserve every user instruction and trigger word. Create the schema-constrained JSON prompt.\n\n"
-        "USER NOTES:\n" + raw_prompt.strip()
-    )
+    context = context if isinstance(context, dict) else {}
+    context_text = json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"
+    if song_mode:
+        user_message = (
+            f"OneNode mode: {effective_mode}.\n"
+            f"Mode contract: {mode_instruction}\n"
+            f"Song context:\n{context_text}\n"
+            "The user may provide only keywords or a rough draft. Produce the requested schema field so it can be edited before "
+            "generation. Return only the schema-constrained JSON object.\n\nUSER NOTES:\n" + raw_prompt.strip()
+        )
+    else:
+        user_message = (
+            f"Canvas: {width} x {height} pixels. Origin: top-left.\n"
+            f"OneNode mode: {effective_mode}.\n"
+            f"Mode contract: {mode_instruction}\n"
+            "The user may provide only keywords. Expand them into a complete instruction while obeying the mode contract. "
+            "Preserve every user instruction and trigger word. Create the schema-constrained JSON prompt.\n\n"
+            "USER NOTES:\n" + raw_prompt.strip()
+        )
     payload = {
         "model": model,
         "messages": [
@@ -810,7 +856,7 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
             "messages": [
                 {
                     "role": "system",
-                    "content": "Repair the malformed JSON. Preserve the image intent. Return only schema-valid JSON.",
+                    "content": "Repair the malformed JSON. Preserve the original intent. Return only schema-valid JSON.",
                 },
                 {"role": "user", "content": content[:24000]},
             ],
@@ -827,7 +873,7 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
             repaired = _llm_content(repaired_response)
         data = _llm_parse_json(repaired)
 
-    if effective_mode not in {"t2v", "i2v"}:
+    if effective_mode not in {"t2v", "i2v", "song_description", "song_lyrics"}:
         data = _llm_enrich_json(data, width, height)
     return {
         "json_prompt": json.dumps(data, ensure_ascii=False, indent=2),
@@ -989,6 +1035,7 @@ async def get_config(request):
         "t2i_templates": cfg.get("t2i_templates", []),
         "discover_prompts": cfg.get("discover_prompts", {}),
         "autofill_prompts": cfg.get("autofill_prompts", {}),
+        "voice_templates": cfg.get("voice_templates", []),
         "llm_defaults": {**LLM_DEFAULTS, "system_prompt": LLM_DEFAULT_SYSTEM_PROMPT},
     })
 
@@ -1019,9 +1066,10 @@ async def enhance_prompt_route(request):
         height = max(64, min(16384, int(payload.get("height") or 1024)))
         mode = str(payload.get("mode") or "t2i")
         operation = str(payload.get("operation") or "")
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
         settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
         result = await asyncio.to_thread(
-            _enhance_prompt_sync, raw_prompt, width, height, settings, mode, operation
+            _enhance_prompt_sync, raw_prompt, width, height, settings, mode, operation, context
         )
         return web.json_response({"ok": True, **result})
     except Exception as exc:

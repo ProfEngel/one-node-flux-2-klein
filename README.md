@@ -13,6 +13,36 @@ A ComfyUI custom node that wraps the full FLUX.2 [klein] workflow into a single 
 
 ---
 
+## Full-screen media modes
+
+The enhanced fork adds a distraction-free WebUI at `/one-node`. It presents the complete OneNode experience directly in the browser, without the ComfyUI canvas, node graph, or toolbars. Image, video, voice, and music modes remain available from one compact mode bar, with a shared Gallery, model settings, prompt enhancement, and synchronized GPU unloading.
+
+### Text to Video - LTX 2.3
+
+![OneNode full-screen Text to Video mode](assets/screenshots/fullscreen-text-to-video.png)
+
+Generate an LTX 2.3 video directly from a text prompt. The new T2V workspace combines optional local-LLM prompt enhancement, resolution, frame rate, duration, seed, optional external audio, an integrated video preview, and the global **Unload** switch in one focused screen.
+
+### Image to Video - LTX 2.3
+
+![OneNode full-screen Image to Video mode](assets/screenshots/fullscreen-image-to-video.png)
+
+Animate an existing image while preserving its visual identity and composition. A first frame can be uploaded, selected from the OneNode Gallery, or handed over from an image-generation mode; optional audio and model unloading are available in the same workflow.
+
+### CloneVoice - Qwen3-TTS
+
+![OneNode full-screen CloneVoice mode](assets/screenshots/fullscreen-clone-voice.png)
+
+Clone a voice from a short reference recording and its exact transcript, then generate new speech with Qwen3-TTS. Named voice templates keep the reference audio and transcript reusable, while generated speech can be previewed immediately or sent directly to T2V and I2V.
+
+### Song - ACE-Step 1.5
+
+![OneNode full-screen Song mode](assets/screenshots/fullscreen-song.png)
+
+Create complete songs with ACE-Step 1.5 from a music description and lyrics. The local LLM can enhance either text field individually or optimize the entire song specification, including duration, BPM, language, key, time signature, and seed, before the editable result is generated and handed to a video mode.
+
+---
+
 ## Tutorial
 
 [![Watch the tutorial](https://img.youtube.com/vi/L4ItbBWXqCo/maxresdefault.jpg)](https://youtu.be/L4ItbBWXqCo)

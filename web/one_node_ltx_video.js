@@ -114,6 +114,16 @@ function initMediaUI(root) {
   };
 
   const modeBar = poseButton.parentElement;
+  const topBar = modeBar.parentElement;
+  const baseSurface = topBar?.parentElement;
+  const baseContent = baseSurface ? [...baseSurface.children].filter(node => node !== topBar) : [];
+  const baseVisibility = new Map(baseContent.map(node => [node, node.style.visibility]));
+  let baseContentHidden = false;
+  const setBaseContentHidden = hidden => {
+    if (baseContentHidden === hidden) return;
+    baseContentHidden = hidden;
+    for (const node of baseContent) node.style.visibility = hidden ? "hidden" : (baseVisibility.get(node) || "");
+  };
   modeBar.style.overflowX = "auto";
   modeBar.style.overflowY = "hidden";
   modeBar.style.scrollbarWidth = "thin";
@@ -139,11 +149,10 @@ function initMediaUI(root) {
     boxSizing: "border-box", fontFamily: "inherit", overflow: "hidden", isolation: "isolate",
   });
   const placeOverlay = () => {
-    const rootBox = root.getBoundingClientRect();
-    const barBox = modeBar.getBoundingClientRect();
-    overlay.style.top = `${Math.max(34, Math.round(barBox.bottom - rootBox.top + 3))}px`;
+    const anchor = topBar || modeBar;
+    overlay.style.top = `${Math.max(34, anchor.offsetTop + anchor.offsetHeight)}px`;
   };
-  new ResizeObserver(placeOverlay).observe(modeBar);
+  new ResizeObserver(placeOverlay).observe(topBar || modeBar);
 
   const smallButton = label => tx(el("button", {
     border: `1px solid ${BORDER}`, borderRadius: "5px", background: "#171717", color: "#bdbdbd",
@@ -449,6 +458,7 @@ function initMediaUI(root) {
   };
   const refresh = () => {
     const active = overlay.style.display !== "none";
+    setBaseContentHidden(active);
     for (const [mode, pill] of Object.entries(pills)) {
       const selected = active && state.mode === mode;
       pill.style.background = selected ? LIME : "#202020";

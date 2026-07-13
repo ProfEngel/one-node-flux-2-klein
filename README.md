@@ -27,7 +27,7 @@ The node has been updated since the tutorial was recorded - check the [Changelog
 
 ## What it does
 
-The node has 6 modes, switchable with a single click:
+The node has 8 modes, switchable with a single click:
 
 **T2I** - standard text to image generation.
 
@@ -44,6 +44,10 @@ The node has 6 modes, switchable with a single click:
 
 **POSE** - copy the pose from one image onto the character from a reference image. Requires the DWPose preprocessor node and a RefControl pose LoRA (a 9B LoRA only for now).
 
+**T2V** - generate an LTX 2.3 video with generated audio from a text prompt.
+
+**I2V** - animate an uploaded first frame with LTX 2.3 while preserving its visual identity and composition.
+
 ### Enhancements in this fork
 
 - Optional prompt enhancement through any OpenAI-compatible local server such as LM Studio.
@@ -52,6 +56,7 @@ The node has 6 modes, switchable with a single click:
 - The generated JSON can be reviewed, edited, and reused without another LLM call.
 - Optional model unloading after each completed generation.
 - A full-screen WebUI at `/one-node`, without the normal ComfyUI canvas and toolbars.
+- Integrated LTX 2.3 T2V and I2V panels with two-pass sampling, spatial latent upscaling, generated or external audio, and video preview.
 - LLM connection data is stored in the browser. This repository contains no personal server address, model name, or API key.
 
 ---
@@ -109,6 +114,30 @@ OneNode appends a mode contract to your editable system prompt. For example, Fac
 Use **View JSON** to inspect or edit the latest enhanced prompt. **Use without Enhance** places that JSON in the prompt field and disables the next LLM call.
 
 Enable **Unload** when ComfyUI should release loaded models and GPU memory after the generated result has been handed to the next node.
+
+### LTX 2.3 video modes
+
+T2V and I2V appear beside Pose in the OneNode header. Their **Models** panel contains all model filenames and stores changes locally in the browser. The public defaults match the supplied LTX 2.3 GGUF workflows but can be changed without editing workflow JSON.
+
+Both modes expose output size, frame rate, duration, and seed. A seed of `0` generates a random seed. Frame counts are adjusted to the temporal layout required by LTX. I2V requires a first-frame image. Optional audio replaces the model-generated soundtrack in the final video container.
+
+Prompt Enhance uses a dedicated LTX JSON schema with shot, motion, camera, lighting, audio, continuity, and avoid fields. **Review JSON** displays the latest enhanced prompt, and **Use without Enhance** reuses it without another LLM request.
+
+The video workflows require a current ComfyUI build with the native LTX nodes plus:
+
+- [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)
+- [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes)
+
+The default model filenames are:
+
+- Diffusion model: `ltx-2.3-22b-distilled-Q4_K_M.gguf`
+- Text encoder: `gemma-3-12b-it-qat-UD-Q4_K_XL.gguf`
+- Connector: `ltx-2.3-22b-dev_embeddings_connectors.safetensors`
+- Video VAE: `ltx-2.3-22b-dev_video_vae.safetensors`
+- Audio VAE: `ltx-2.3-22b-dev_audio_vae.safetensors`
+- Spatial upscaler: `ltx-2.3-spatial-upscaler-x2-1.0.safetensors`
+- T2V LoRA: `ltx2.3/ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors`
+- I2V LoRA: `ltx2.3/ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors`
 
 ---
 
@@ -175,6 +204,7 @@ Fork enhancements were developed with OpenAI Codex. See [ROADMAP.md](ROADMAP.md)
 - Added prompt review, editing, and reuse without another LLM call.
 - Added optional model unloading after generation.
 - Added the distraction-free `/one-node` full-screen WebUI.
+- Added integrated LTX 2.3 T2V and I2V modes with optional external audio.
 - Removed machine-specific LLM defaults and added automatic loaded-model discovery.
 - Added attribution, installation guidance, and the optional multimedia roadmap.
 

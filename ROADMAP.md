@@ -12,16 +12,6 @@ Planned around the ComfyUI-native ACE-Step 1.5 nodes. A portable UI needs separa
 
 ## Text2Video and Image2Video
 
-The evaluated LTX 2.3 graph depends on GGUF loaders, KJNodes, WhatDreamsCost LTX Director nodes, an unload node, two LoRAs, separate video and audio VAEs, and a latent upscaler. Its timeline JSON also contained local image and audio filenames. Those values are intentionally excluded from this repository.
+Implemented in the main full-screen interface. The public API workflows were rebuilt from separate LTX 2.3 source workflows and contain no local media filenames, frontend Get/Set nodes, rgthree controls, or embedded preview history. Missing video dependencies are checked only when a video is requested, so the FLUX image modes continue to work without them.
 
-A public video module should:
-
-- keep T2V, I2V, and optional audio conditioning as separate validated paths;
-- discover or explicitly configure every required model instead of embedding one machine's filenames;
-- upload reference images and audio through ComfyUI's input API;
-- construct clean LTX Director timeline data at runtime;
-- expose output duration, frame rate, dimensions, guide strength, and audio behavior;
-- declare every optional custom-node dependency and fail with a useful message;
-- be tested on a clean ComfyUI installation before release.
-
-The multimedia work should be delivered as a separate feature branch or optional companion extension so that missing audio or video dependencies cannot break the FLUX image node.
+Future video work may add multi-shot LTX Director timelines and audio-driven lip synchronization. External audio in the current release replaces the generated soundtrack during final muxing; it is not yet used as a motion or lip-sync conditioning signal.

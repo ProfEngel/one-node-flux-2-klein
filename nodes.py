@@ -71,6 +71,14 @@ LLM_MODE_INSTRUCTIONS = {
         "The pose image controls body pose and framing. The reference image controls subject identity, appearance, clothing, and style. "
         "Keep the reference subject recognizable while following the pose accurately."
     ),
+    "t2v": (
+        "Create one temporally coherent LTX 2.3 video from scratch. Expand the notes into a clear shot progression with subject motion, "
+        "camera behavior, stable identities and geometry, lighting continuity, and an intentional generated soundtrack or ambience."
+    ),
+    "i2v": (
+        "The uploaded image is the authoritative first frame for an LTX 2.3 video. Preserve its subjects, identities, composition, "
+        "perspective, clothing, lighting, and environment while describing only plausible motion and temporal development from that frame."
+    ),
 }
 
 LLM_PROMPT_SCHEMA = {
@@ -104,6 +112,22 @@ LLM_PROMPT_SCHEMA = {
         "avoid": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["positive_prompt", "style", "camera", "lighting", "composition", "constraints", "avoid"],
+    "additionalProperties": False,
+}
+
+LLM_VIDEO_PROMPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "positive_prompt": {"type": "string"},
+        "shot": {"type": "string"},
+        "motion": {"type": "array", "items": {"type": "string"}},
+        "camera": {"type": "string"},
+        "lighting": {"type": "string"},
+        "audio": {"type": "string"},
+        "continuity": {"type": "array", "items": {"type": "string"}},
+        "avoid": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["positive_prompt", "shot", "motion", "camera", "lighting", "audio", "continuity", "avoid"],
     "additionalProperties": False,
 }
 
@@ -714,13 +738,13 @@ def _llm_enrich_json(data, width, height):
     return data
 
 
-def _llm_schema_format(name):
+def _llm_schema_format(name, schema=LLM_PROMPT_SCHEMA):
     return {
         "type": "json_schema",
         "json_schema": {
             "name": name,
             "strict": True,
-            "schema": LLM_PROMPT_SCHEMA,
+            "schema": schema,
         },
     }
 
@@ -743,6 +767,12 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
     operation = str(operation or "").strip().lower()
     effective_mode = operation if mode == "inpaint" and operation in {"inpaint", "outpaint"} else mode
     mode_instruction = LLM_MODE_INSTRUCTIONS.get(effective_mode, LLM_MODE_INSTRUCTIONS["t2i"])
+    response_schema = LLM_VIDEO_PROMPT_SCHEMA if effective_mode in {"t2v", "i2v"} else LLM_PROMPT_SCHEMA
+    if effective_mode in {"t2v", "i2v"}:
+        system_prompt += (
+            "\n\nACTIVE VIDEO MODE: Write for LTX 2.3 video generation. The video response schema supersedes "
+            "image-only composition or bounding-box requirements in the editable instructions above."
+        )
 
     user_message = (
         f"Canvas: {width} x {height} pixels. Origin: top-left.\n"
@@ -761,7 +791,7 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
         "temperature": max(0.0, min(2.0, float(cfg.get("temperature") or 0.0))),
         "max_tokens": max_tokens,
         "stream": False,
-        "response_format": _llm_schema_format("one_node_flux_prompt"),
+        "response_format": _llm_schema_format("one_node_visual_prompt", response_schema),
     }
     response = _llm_post(endpoint, payload, cfg.get("api_key"), timeout_seconds)
     content = _llm_content(response)
@@ -787,7 +817,7 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
             "temperature": 0.0,
             "max_tokens": max(max_tokens, 6000),
             "stream": False,
-            "response_format": _llm_schema_format("one_node_flux_prompt_repaired"),
+            "response_format": _llm_schema_format("one_node_visual_prompt_repaired", response_schema),
         }
         repaired_response = _llm_post(endpoint, repair_payload, cfg.get("api_key"), timeout_seconds)
         repaired = _llm_content(repaired_response)
@@ -797,7 +827,8 @@ def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operat
             repaired = _llm_content(repaired_response)
         data = _llm_parse_json(repaired)
 
-    data = _llm_enrich_json(data, width, height)
+    if effective_mode not in {"t2v", "i2v"}:
+        data = _llm_enrich_json(data, width, height)
     return {
         "json_prompt": json.dumps(data, ensure_ascii=False, indent=2),
         "model": model,
@@ -913,6 +944,8 @@ PromptServer.instance.routes.get("/flux_klein/workflow_outpaint")(_serve_json("w
 PromptServer.instance.routes.get("/flux_klein/workflow_faceswap")(_serve_json("workflows/faceswap_workflow.json"))
 PromptServer.instance.routes.get("/flux_klein/workflow_pose")(_serve_json("workflows/pose_workflow.json"))
 PromptServer.instance.routes.get("/flux_klein/workflow_remove_bg")(_serve_json("workflows/remove_bg_workflow.json"))
+PromptServer.instance.routes.get("/flux_klein/workflow_ltx_t2v")(_serve_json("workflows/ltx_t2v_workflow.json"))
+PromptServer.instance.routes.get("/flux_klein/workflow_ltx_i2v")(_serve_json("workflows/ltx_i2v_workflow.json"))
 
 
 @PromptServer.instance.routes.get("/flux_klein/bgremoval_models")

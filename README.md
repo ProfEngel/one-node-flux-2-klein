@@ -1,5 +1,7 @@
 # One Node · FLUX.2 [klein]
 
+> Enhanced community fork of [yanokusnir-ai/one-node-flux-2-klein](https://github.com/yanokusnir-ai/one-node-flux-2-klein). The original interface, workflows, and project direction are by Yan Kusnir. This fork adds optional local-LLM prompt enhancement, prompt review and reuse, GPU unloading, and a distraction-free full-screen WebUI.
+
 A ComfyUI custom node that wraps the full FLUX.2 [klein] workflow into a single self-contained UI widget. No graph to build, no spaghetti wires to connect, just one powerful node with everything inside.
 
 > *One Node to rule them all, One Node to find them,*
@@ -42,6 +44,16 @@ The node has 6 modes, switchable with a single click:
 
 **POSE** - copy the pose from one image onto the character from a reference image. Requires the DWPose preprocessor node and a RefControl pose LoRA (a 9B LoRA only for now).
 
+### Enhancements in this fork
+
+- Optional prompt enhancement through any OpenAI-compatible local server such as LM Studio.
+- Mode-aware instructions for T2I, I2I, Edit, Inpaint, Outpaint, Faceswap, and Pose.
+- Short notes are expanded into structured JSON prompts with normalized and pixel-space composition regions.
+- The generated JSON can be reviewed, edited, and reused without another LLM call.
+- Optional model unloading after each completed generation.
+- A full-screen WebUI at `/one-node`, without the normal ComfyUI canvas and toolbars.
+- LLM connection data is stored in the browser. This repository contains no personal server address, model name, or API key.
+
 ---
 
 ## Installation
@@ -49,7 +61,7 @@ The node has 6 modes, switchable with a single click:
 Clone this repo into your ComfyUI `custom_nodes` folder:
 
 ```
-git clone https://github.com/yanokusnir-ai/one-node-flux-2-klein.git
+git clone https://github.com/ProfEngel/one-node-flux-2-klein.git
 ```
 
 You need one additional custom node for inpaint and outpaint modes:
@@ -72,6 +84,31 @@ python_embeded\python.exe -s -m pip install -r ComfyUI/custom_nodes/comfyui_cont
 On other setups (venv, ComfyUI Desktop, Linux/Mac), follow the install instructions in the [comfyui_controlnet_aux readme](https://github.com/Fannovel16/comfyui_controlnet_aux#installation).
 
 Restart ComfyUI. The node appears as **One Node · FLUX.2 [klein]**.
+
+### Full-screen WebUI
+
+After ComfyUI has started, open:
+
+```text
+http://127.0.0.1:8188/one-node
+```
+
+Replace `8188` if your ComfyUI instance uses another port. The regular canvas remains available at the normal ComfyUI URL.
+
+### Local prompt enhancement with LM Studio
+
+1. Start LM Studio and load an instruction-tuned model.
+2. Start its local OpenAI-compatible server.
+3. Open OneNode Settings and enter the server URL, normally `http://127.0.0.1:1234`.
+4. Leave Model empty to use the first model currently loaded in LM Studio, or enter an exact model ID.
+5. Edit the System Prompt when you want different prompt-writing behavior.
+6. Enable **Enhance** for the current mode.
+
+OneNode appends a mode contract to your editable system prompt. For example, Faceswap keeps image 1 as the target scene and uses image 2 only for facial identity, while Inpaint restricts changes to the mask. The LLM response is validated as JSON and repaired once when a model returns malformed JSON.
+
+Use **View JSON** to inspect or edit the latest enhanced prompt. **Use without Enhance** places that JSON in the prompt field and disables the next LLM call.
+
+Enable **Unload** when ComfyUI should release loaded models and GPU memory after the generated result has been handed to the next node.
 
 ---
 
@@ -108,7 +145,7 @@ This node works with both the 4B and 9B variants of FLUX.2 [klein]. The 4B model
 
 The 9B model is released under the **FLUX Non-Commercial License** by Black Forest Labs. This means you can use it for personal and research purposes, but commercial use is not permitted. If you use the 9B model, you are responsible for complying with that license.
 
-This node itself is fully open source with no restrictions.
+This repository is a GitHub fork of the upstream project. At the time this fork was prepared, the upstream repository did not contain a formal software license file. The upstream author retains rights to the original work; contributors retain rights to their additions. Do not assume a permissive software license until the upstream project publishes one.
 
 ---
 
@@ -124,9 +161,22 @@ Thanks. Now go make something cool. :)
 
 Built with the help of [Claude](https://claude.ai) by Anthropic.
 
+Fork enhancements were developed with OpenAI Codex. See [ROADMAP.md](ROADMAP.md) for the status of optional audio and video modes.
+
 ---
 
 ## Changelog
+
+### July 13, 2026 - Enhanced fork
+
+- Added optional OpenAI-compatible local-LLM prompt enhancement.
+- Added mode-aware prompt contracts for every image workflow, including separate Inpaint and Outpaint behavior.
+- Added strict JSON output, malformed-response repair, normalized regions, and pixel-space bounding boxes.
+- Added prompt review, editing, and reuse without another LLM call.
+- Added optional model unloading after generation.
+- Added the distraction-free `/one-node` full-screen WebUI.
+- Removed machine-specific LLM defaults and added automatic loaded-model discovery.
+- Added attribution, installation guidance, and the optional multimedia roadmap.
 
 ### July 4, 2026
 

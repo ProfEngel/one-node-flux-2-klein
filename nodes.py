@@ -2,8 +2,12 @@
 import json
 import glob
 import time
+import asyncio
+import re
 import subprocess
 import shutil
+import urllib.error
+import urllib.request
 from pathlib import Path
 import folder_paths
 from aiohttp import web
@@ -16,6 +20,92 @@ SUBFOLDER = "one-node-flux-2-klein"
 # User config lives outside the node folder so it survives reinstalls / git pull.
 USER_CONFIG_DIR = os.path.join(folder_paths.get_user_directory(), "default", SUBFOLDER)
 USER_CONFIG_PATH = os.path.join(USER_CONFIG_DIR, "config.json")
+
+LLM_DEFAULTS = {
+    "base_url": "http://127.0.0.1:1234",
+    "model": "",
+    "temperature": 0.2,
+    "context_length": 32768,
+    "max_tokens": 6000,
+    "timeout_seconds": 240,
+    "api_key": "lm-studio",
+}
+
+LLM_DEFAULT_SYSTEM_PROMPT = """You are a prompt engineer for FLUX.2 Klein image generation.
+Turn even very short notes into a precise, visually coherent image instruction.
+
+Requirements:
+- Preserve every explicit subject, identity, object, color, action, trigger word, and style request.
+- Do not invent additional people, brands, logos, captions, or major subjects.
+- Write the final positive_prompt in English.
+- Describe subject, environment, composition, perspective, camera, lighting, materials, textures, and mood concretely.
+- Place each important visible element with bbox_normalized [x_min, y_min, x_max, y_max].
+- The origin is top-left; x increases to the right and y increases downward; all values are between 0 and 1.
+- Avoid contradictory positions and unintended overlaps.
+- Return only one valid JSON object matching the requested schema, without Markdown or commentary.
+"""
+
+LLM_MODE_INSTRUCTIONS = {
+    "t2i": "Create the complete scene from scratch from the user's notes.",
+    "i2i": (
+        "Image 1 is the source image. Treat the user's notes as requested variations. "
+        "Preserve its identity, subject count, layout, camera, and recognizable details unless the notes explicitly change them."
+    ),
+    "edit": (
+        "Image 1 is the primary image and image 2, when present, is a visual reference. "
+        "Apply only the requested edit and preserve all unspecified content from image 1."
+    ),
+    "inpaint": (
+        "Only the masked region may change. Describe what must appear inside that region and how it joins the surrounding image. "
+        "Everything outside the mask must remain unchanged."
+    ),
+    "outpaint": (
+        "Extend image 1 into the new canvas area. Continue perspective, lighting, textures, geometry, and edge content naturally. "
+        "The original image area must remain unchanged."
+    ),
+    "faceswap": (
+        "Image 1 supplies the target scene, body, pose, framing, expression, and lighting. Image 2 supplies facial identity only. "
+        "Preserve image 1 outside the head and integrate image 2 identity with matching perspective, skin detail, focus, and illumination."
+    ),
+    "pose": (
+        "The pose image controls body pose and framing. The reference image controls subject identity, appearance, clothing, and style. "
+        "Keep the reference subject recognizable while following the pose accurately."
+    ),
+}
+
+LLM_PROMPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "positive_prompt": {"type": "string"},
+        "style": {"type": "string"},
+        "camera": {"type": "string"},
+        "lighting": {"type": "string"},
+        "composition": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "element": {"type": "string"},
+                    "description": {"type": "string"},
+                    "region": {"type": "string"},
+                    "bbox_normalized": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0, "maximum": 1},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
+                    "depth": {"type": "string"},
+                },
+                "required": ["element", "description", "region", "bbox_normalized", "depth"],
+                "additionalProperties": False,
+            },
+        },
+        "constraints": {"type": "array", "items": {"type": "string"}},
+        "avoid": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["positive_prompt", "style", "camera", "lighting", "composition", "constraints", "avoid"],
+    "additionalProperties": False,
+}
 
 
 def _favorites_path():
@@ -469,6 +559,255 @@ def _write_json_meta(image_path, meta_dict):
         return ok_png  # return True if at least PNG embed succeeded
 
 
+def _llm_chat_endpoint(base_url):
+    url = str(base_url or "").strip().rstrip("/")
+    if not url:
+        raise ValueError("LM Studio URL is empty")
+    if url.endswith("/chat/completions"):
+        return url
+    if not url.endswith("/v1"):
+        url += "/v1"
+    return url + "/chat/completions"
+
+
+def _llm_resolve_model(base_url, configured_model, api_key, timeout_seconds):
+    model = str(configured_model or "").strip()
+    if model:
+        return model
+    endpoint = _llm_chat_endpoint(base_url).rsplit("/chat/completions", 1)[0] + "/models"
+    request = urllib.request.Request(
+        endpoint,
+        headers={"Authorization": f"Bearer {api_key or 'lm-studio'}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=int(timeout_seconds)) as response:
+            models = json.loads(response.read().decode("utf-8")).get("data", [])
+    except Exception as exc:
+        raise RuntimeError(
+            "No LLM model is configured and the loaded LM Studio model could not be detected"
+        ) from exc
+    if not models or not isinstance(models[0], dict) or not models[0].get("id"):
+        raise RuntimeError("No model is currently loaded in LM Studio")
+    return str(models[0]["id"])
+
+
+def _llm_post(endpoint, payload, api_key, timeout_seconds):
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key or 'lm-studio'}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=int(timeout_seconds)) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"LM Studio HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"LM Studio is not reachable at {endpoint}: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"LM Studio timed out after {timeout_seconds} seconds") from exc
+
+
+def _llm_content(response):
+    try:
+        content = response["choices"][0]["message"].get("content", "")
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Invalid LM Studio response: choices[0].message is missing") from exc
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content or "").strip()
+
+
+def _llm_stopped_in_reasoning(response):
+    try:
+        choice = response["choices"][0]
+        return choice.get("finish_reason") == "length" and bool(
+            choice["message"].get("reasoning_content")
+        )
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
+def _llm_parse_json(content):
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(content or "").strip(), flags=re.IGNORECASE)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise RuntimeError("The LLM did not return a JSON object")
+        try:
+            data = json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON from LM Studio: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("The LLM JSON must be an object")
+    return data
+
+
+def _llm_number(value, fallback):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def _llm_box(item, width, height):
+    box = item.get("bbox_normalized")
+    if isinstance(box, dict):
+        box = [box.get("x_min"), box.get("y_min"), box.get("x_max"), box.get("y_max")]
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        px = item.get("bbox_px")
+        if isinstance(px, dict):
+            box = [
+                _llm_number(px.get("x_min"), 0) / width,
+                _llm_number(px.get("y_min"), 0) / height,
+                _llm_number(px.get("x_max"), width) / width,
+                _llm_number(px.get("y_max"), height) / height,
+            ]
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        box = [0, 0, 1, 1]
+    values = [
+        max(0.0, min(1.0, _llm_number(value, fallback)))
+        for value, fallback in zip(box, (0, 0, 1, 1))
+    ]
+    if values[2] <= values[0]:
+        values[2] = min(1.0, values[0] + 0.05)
+    if values[3] <= values[1]:
+        values[3] = min(1.0, values[1] + 0.05)
+    return [round(value, 4) for value in values]
+
+
+def _llm_enrich_json(data, width, height):
+    data["canvas"] = {
+        "width_px": width,
+        "height_px": height,
+        "aspect_ratio": f"{width}:{height}",
+        "origin": "top-left",
+        "x_axis": "left-to-right",
+        "y_axis": "top-to-bottom",
+    }
+    composition = data.get("composition")
+    if not isinstance(composition, list):
+        composition = []
+        data["composition"] = composition
+    for item in composition:
+        if not isinstance(item, dict):
+            continue
+        box = _llm_box(item, width, height)
+        item["bbox_normalized"] = box
+        item["bbox_px"] = {
+            "x_min": round(box[0] * width),
+            "y_min": round(box[1] * height),
+            "x_max": round(box[2] * width),
+            "y_max": round(box[3] * height),
+        }
+    return data
+
+
+def _llm_schema_format(name):
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "strict": True,
+            "schema": LLM_PROMPT_SCHEMA,
+        },
+    }
+
+
+def _enhance_prompt_sync(raw_prompt, width, height, settings, mode="t2i", operation=""):
+    cfg = dict(LLM_DEFAULTS)
+    if isinstance(settings, dict):
+        cfg.update({key: value for key, value in settings.items() if value is not None})
+    system_prompt = str(cfg.get("system_prompt") or LLM_DEFAULT_SYSTEM_PROMPT).strip()
+    endpoint = _llm_chat_endpoint(cfg["base_url"])
+    context_length = max(4096, min(262144, int(cfg.get("context_length") or 32768)))
+    requested_tokens = max(512, min(32768, int(cfg.get("max_tokens") or 6000)))
+    estimated_input_tokens = max(256, (len(system_prompt) + len(raw_prompt)) // 3)
+    max_tokens = max(512, min(requested_tokens, context_length - estimated_input_tokens - 512))
+    timeout_seconds = max(10, min(1800, int(cfg.get("timeout_seconds") or 240)))
+    model = _llm_resolve_model(
+        cfg["base_url"], cfg.get("model"), cfg.get("api_key"), timeout_seconds
+    )
+    mode = str(mode or "t2i").strip().lower()
+    operation = str(operation or "").strip().lower()
+    effective_mode = operation if mode == "inpaint" and operation in {"inpaint", "outpaint"} else mode
+    mode_instruction = LLM_MODE_INSTRUCTIONS.get(effective_mode, LLM_MODE_INSTRUCTIONS["t2i"])
+
+    user_message = (
+        f"Canvas: {width} x {height} pixels. Origin: top-left.\n"
+        f"OneNode mode: {effective_mode}.\n"
+        f"Mode contract: {mode_instruction}\n"
+        "The user may provide only keywords. Expand them into a complete instruction while obeying the mode contract. "
+        "Preserve every user instruction and trigger word. Create the schema-constrained JSON prompt.\n\n"
+        "USER NOTES:\n" + raw_prompt.strip()
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "temperature": max(0.0, min(2.0, float(cfg.get("temperature") or 0.0))),
+        "max_tokens": max_tokens,
+        "stream": False,
+        "response_format": _llm_schema_format("one_node_flux_prompt"),
+    }
+    response = _llm_post(endpoint, payload, cfg.get("api_key"), timeout_seconds)
+    content = _llm_content(response)
+    if not content and _llm_stopped_in_reasoning(response):
+        payload["max_tokens"] = min(max(max_tokens * 2, 8000), 32768)
+        response = _llm_post(endpoint, payload, cfg.get("api_key"), timeout_seconds)
+        content = _llm_content(response)
+    if not content:
+        raise RuntimeError("LM Studio returned no final JSON content")
+
+    try:
+        data = _llm_parse_json(content)
+    except RuntimeError:
+        repair_payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Repair the malformed JSON. Preserve the image intent. Return only schema-valid JSON.",
+                },
+                {"role": "user", "content": content[:24000]},
+            ],
+            "temperature": 0.0,
+            "max_tokens": max(max_tokens, 6000),
+            "stream": False,
+            "response_format": _llm_schema_format("one_node_flux_prompt_repaired"),
+        }
+        repaired_response = _llm_post(endpoint, repair_payload, cfg.get("api_key"), timeout_seconds)
+        repaired = _llm_content(repaired_response)
+        if not repaired and _llm_stopped_in_reasoning(repaired_response):
+            repair_payload["max_tokens"] = min(max(max_tokens * 2, 8000), 32768)
+            repaired_response = _llm_post(endpoint, repair_payload, cfg.get("api_key"), timeout_seconds)
+            repaired = _llm_content(repaired_response)
+        data = _llm_parse_json(repaired)
+
+    data = _llm_enrich_json(data, width, height)
+    return {
+        "json_prompt": json.dumps(data, ensure_ascii=False, indent=2),
+        "model": model,
+        "endpoint": endpoint,
+        "mode": effective_mode,
+        "width": width,
+        "height": height,
+    }
+
+
 def _serve_json(filename):
     async def handler(request):
         path = os.path.join(NODE_DIR, filename)
@@ -478,6 +817,92 @@ def _serve_json(filename):
             data = json.load(f)
         return web.json_response(data)
     return handler
+
+
+@PromptServer.instance.routes.get("/one-node")
+@PromptServer.instance.routes.get("/one-node/")
+async def one_node_webui(request):
+    """Serve a distraction-free shell around ComfyUI's native OneNode UI."""
+    html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#070708">
+  <title>OneNode - FLUX.2 Klein</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #070708; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #dedede; }
+    iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; opacity: 0; transition: opacity .28s ease; }
+    body.ready iframe { opacity: 1; }
+    #loading { position: fixed; inset: 0; display: grid; place-items: center; background: #070708; transition: opacity .22s ease; }
+    body.ready #loading { opacity: 0; pointer-events: none; }
+    .mark { display: flex; align-items: center; gap: 12px; color: #f0ff41; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .spinner { width: 18px; height: 18px; border: 2px solid #2a2a2a; border-top-color: #f0ff41; border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <iframe id="app" title="OneNode FLUX.2 Klein" src="/?one-node=1&amp;one-node-embed=1" allow="clipboard-read; clipboard-write" autofocus></iframe>
+  <div id="loading"><div class="mark"><span class="spinner"></span><span>OneNode</span></div></div>
+  <script>
+    const reveal = () => document.body.classList.add("ready");
+    const appFrame = document.getElementById("app");
+    const activateKiosk = () => {
+      try {
+        const doc = appFrame.contentDocument;
+        const root = doc?.querySelector(".fk-root");
+        if (!root) return false;
+        const widget = root.closest(".dom-widget");
+        if (!widget) {
+          root.querySelector('button[title="Fullscreen"]')?.click();
+          reveal();
+          return true;
+        }
+        if (!doc.getElementById("fk-shell-kiosk-style")) {
+          const style = doc.createElement("style");
+          style.id = "fk-shell-kiosk-style";
+          style.textContent = `
+            #fk-shell-backdrop{position:fixed;inset:0;z-index:99980;background:#060608}
+            body.fk-shell-kiosk #graph-canvas-container .isolate:has(.fk-root){position:fixed!important;inset:0!important;z-index:99991!important;pointer-events:none!important}
+            body.fk-shell-kiosk #graph-canvas-container .isolate:has(.fk-root) .dom-widget:not(:has(.fk-root)){display:none!important}
+            body.fk-shell-kiosk .dom-widget:has(.fk-root){position:fixed!important;left:50%!important;top:50%!important;display:block!important;width:980px!important;height:551px!important;transform:translate(-50%,-50%) scale(var(--fk-shell-scale,1))!important;transform-origin:center!important;z-index:99991!important;pointer-events:auto!important;opacity:1!important;clip-path:none!important;will-change:auto!important}
+            body.fk-shell-kiosk .dom-widget:has(.fk-root) .fk-root{width:980px!important;height:551px!important;position:relative!important;inset:auto!important;margin:0!important;transform:none!important;border-radius:0!important;overflow:hidden!important}
+          `;
+          doc.head.appendChild(style);
+        }
+        if (!doc.getElementById("fk-shell-backdrop")) {
+          const backdrop = doc.createElement("div");
+          backdrop.id = "fk-shell-backdrop";
+          doc.body.appendChild(backdrop);
+        }
+        const updateScale = () => {
+          const scale = Math.min(appFrame.clientWidth / 980, appFrame.clientHeight / 551) * 0.97;
+          doc.body.style.setProperty("--fk-shell-scale", String(scale));
+        };
+        updateScale();
+        window.addEventListener("resize", updateScale, {passive: true});
+        doc.body.classList.add("fk-shell-kiosk");
+        reveal();
+        return true;
+      } catch (error) {
+        return false;
+      }
+    };
+    window.addEventListener("message", event => {
+      if (event.origin === location.origin && event.data?.type === "flux-klein-kiosk-ready") reveal();
+    });
+    const timer = setInterval(() => {
+      if (activateKiosk()) clearInterval(timer);
+    }, 250);
+    appFrame.addEventListener("load", activateKiosk);
+    setTimeout(reveal, 15000);
+    setTimeout(() => clearInterval(timer), 30000);
+  </script>
+</body>
+</html>"""
+    return web.Response(text=html, content_type="text/html")
 
 
 PromptServer.instance.routes.get("/flux_klein/workflow_t2i")(_serve_json("workflows/t2i_workflow.json"))
@@ -529,6 +954,7 @@ async def get_config(request):
         "t2i_templates": cfg.get("t2i_templates", []),
         "discover_prompts": cfg.get("discover_prompts", {}),
         "autofill_prompts": cfg.get("autofill_prompts", {}),
+        "llm_defaults": {**LLM_DEFAULTS, "system_prompt": LLM_DEFAULT_SYSTEM_PROMPT},
     })
 
 
@@ -543,6 +969,29 @@ async def save_config_route(request):
     except Exception as e:
         print(f"[FluxKlein] config save error: {e}")
         return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post("/flux_klein/enhance_prompt")
+async def enhance_prompt_route(request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "error": "invalid payload"}, status=400)
+        raw_prompt = str(payload.get("prompt") or "").strip()
+        if not raw_prompt:
+            return web.json_response({"ok": False, "error": "prompt is empty"}, status=400)
+        width = max(64, min(16384, int(payload.get("width") or 1024)))
+        height = max(64, min(16384, int(payload.get("height") or 1024)))
+        mode = str(payload.get("mode") or "t2i")
+        operation = str(payload.get("operation") or "")
+        settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+        result = await asyncio.to_thread(
+            _enhance_prompt_sync, raw_prompt, width, height, settings, mode, operation
+        )
+        return web.json_response({"ok": True, **result})
+    except Exception as exc:
+        print(f"[FluxKlein] prompt enhance error: {exc}")
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
 
 @PromptServer.instance.routes.get("/flux_klein/gallery")

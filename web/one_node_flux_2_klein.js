@@ -11,6 +11,7 @@ const C = {
 
 const NODE_W = 980;
 const NODE_H = Math.round(NODE_W * 9 / 16);
+const KIOSK_MODE = new URLSearchParams(window.location.search).get("one-node") === "1";
 
 // ── Workflow node IDs ─────────────────────────────────────────────────────────
 // Shared by both t2i_workflow.json and edit_workflow.json
@@ -42,6 +43,28 @@ const WF = {
 const LS_KEY = "one_node_flux_klein_state";
 const DEFAULT_NEG_PROMPT = "low quality, deformed, blurry, watermark, ugly, bad anatomy, disfigured, mutated, extra limbs, poorly drawn face, bad proportions, gross proportions, jpeg artifacts, overexposed, underexposed";
 const DEFAULT_FACESWAP_PROMPT = "Replace the head in image 1 with the head from image 2, adapting the facial features to match the artistic style, focus, and environmental lighting of the image 1.";
+const DEFAULT_LLM_SYSTEM_PROMPT = `You are a prompt engineer for FLUX.2 Klein image generation.
+Turn even very short notes into a precise, visually coherent image instruction.
+
+Requirements:
+- Preserve every explicit subject, identity, object, color, action, trigger word, and style request.
+- Do not invent additional people, brands, logos, captions, or major subjects.
+- Write the final positive_prompt in English.
+- Describe subject, environment, composition, perspective, camera, lighting, materials, textures, and mood concretely.
+- Place each important visible element with bbox_normalized [x_min, y_min, x_max, y_max].
+- The origin is top-left; x increases to the right and y increases downward; all values are between 0 and 1.
+- Avoid contradictory positions and unintended overlaps.
+- Return only one valid JSON object matching the requested schema, without Markdown or commentary.`;
+const DEFAULT_LLM_SETTINGS = {
+  baseUrl:"http://127.0.0.1:1234",
+  model:"",
+  temperature:0.2,
+  contextLength:32768,
+  maxTokens:6000,
+  timeoutSeconds:240,
+  apiKey:"lm-studio",
+  systemPrompt:DEFAULT_LLM_SYSTEM_PROMPT,
+};
 
 // ── Resolution presets (Flux-friendly, divisible by 16) ──────────────────────
 const RES_PRESETS = [
@@ -430,6 +453,7 @@ let _activeShowFinalBatch=null; // T2I batch: called with an array of {filename,
 let _activeShowTemp=null; // auto-save off: called with array of temp {filename, subfolder, type}
 let _activeSaveNode=null; // auto-save off: id of the current mode's save node (now a PreviewImage)
 let _activeAutoSend=null; // ()=>{} run after a result is shown, to push the image downstream
+let _activeAfterGeneration=null; // optional model unload after the result and downstream push are complete
 let _activeBatchN=1; // batch size SNAPSHOTTED at Generate-click time — the completion handler
                      // must use this, not the live S.batchCount, so changing the ×N dropdown
                      // mid-run can't mis-route the result set (drop/mis-slice fresh images).
@@ -610,7 +634,8 @@ function _oneNodeChainForward(srcId){
         // Gallery returns newest first; reverse so the batch is shown in generation order.
         const batch=fresh.slice(0,batchN).reverse().map(v=>({filename:v.filename,subfolder:v.subfolder||""}));
         _activeShowFinalBatch(batch);
-        _activeAutoSend?.();
+        await _activeAutoSend?.();
+        await _activeAfterGeneration?.();
         return;
       }
       // Only ever use a FRESH image (one that didn't exist before this run). Never fall
@@ -621,13 +646,16 @@ function _oneNodeChainForward(srcId){
         const cb=Date.now();
         const url=api.apiURL(`/view?filename=${encodeURIComponent(v.filename)}&type=output&subfolder=${encodeURIComponent(v.subfolder||"")}&t=${cb}`);
         _activeShowFinal?.(url,v.filename,v.subfolder||"");
-        _activeAutoSend?.();
+        await _activeAutoSend?.();
+        await _activeAfterGeneration?.();
       }else{
         _activeResetBtn?.();
+        await _activeAfterGeneration?.();
       }
     }catch(e){
       console.error("[FluxKlein] execution_success:",e);
       _activeResetBtn?.();
+      await _activeAfterGeneration?.();
     }
   });
 
@@ -642,6 +670,7 @@ function _oneNodeChainForward(srcId){
     const msg=fmtErr(evt.detail?.exception_message||evt.detail?.error||evt.detail||"Execution failed.");
     _activeShowError?.(msg);
     _activeResetBtn?.();
+    _activeAfterGeneration?.();
   });
 
   api.addEventListener("b_preview",evt=>{
@@ -659,6 +688,31 @@ let _activeSetStage=null;
 // ─────────────────────────────────────────────────────────────────────────────
 app.registerExtension({
   name:"FluxKleinPlayground.v1",
+  async setup(){
+    if(!KIOSK_MODE) return;
+
+    // A kiosk page can be opened without loading a workflow first. Keep checking while
+    // ComfyUI restores its graph, create exactly one Flux node when needed, then enter
+    // the node's native fullscreen view as soon as its UI cache is ready.
+    const ensureKioskNode=()=>{
+      try{
+        const graph=app.canvas?.graph;
+        if(!graph||typeof LiteGraph==="undefined") return;
+        let node=(graph._nodes||[]).find(n=>n.type==="FluxKleinOneNode");
+        if(!node){
+          node=LiteGraph.createNode("FluxKleinOneNode");
+          if(!node) return;
+          node.pos=[80,80];
+          graph.add(node);
+        }
+      }catch(e){
+        console.warn("[FluxKlein] kiosk startup:",e);
+      }
+    };
+    ensureKioskNode();
+    const timer=setInterval(ensureKioskNode,400);
+    setTimeout(()=>clearInterval(timer),20000);
+  },
   async beforeRegisterNodeDef(nodeType,nodeData){
     if(nodeData.name!=="FluxKleinOneNode") return;
 
@@ -693,6 +747,7 @@ app.registerExtension({
         _activeSetStage=cached.fns.setStage;
         _activePoseSkeleton=cached.fns.poseSkeleton;
         _activeAutoSend=cached.fns.autoSend;
+        _activeAfterGeneration=cached.fns.afterGeneration;
         _activePromptIdRef=cached.fns.getPromptId;
         const _cnode=this;
         this.addDOMWidget("fk_ui","div",cached.root,{
@@ -849,6 +904,10 @@ app.registerExtension({
           // UI layout: "classic" = wide prompt under the preview (default),
           // "tall" = prompt in the left column so the preview gets full height.
           layoutMode:   saved.layoutMode||"classic",
+          llmSettings:  {...DEFAULT_LLM_SETTINGS,...(saved.llmSettings||{})},
+          enhanceByMode:{t2i:false,i2i:false,edit:false,inpaint:false,faceswap:false,pose:false,...(saved.enhanceByMode||{})},
+          lastEnhancedByMode:{t2i:"",i2i:"",edit:"",inpaint:"",faceswap:"",pose:"",...(saved.lastEnhancedByMode||{})},
+          unloadAfterGeneration:saved.unloadAfterGeneration!==undefined?saved.unloadAfterGeneration:false,
           // Outpaint seam feather (px the mask fades into the original). 0 = auto
           // (the previous min(48, edge/6) heuristic), so existing users see no change.
           opFeather:    saved.opFeather!==undefined?saved.opFeather:0,
@@ -886,6 +945,8 @@ app.registerExtension({
           userLoras:S.userLoras, soundEnabled, extLoaders:S.extLoaders,
           downscaleRef:S.downscaleRef, downscaleRefMP:S.downscaleRefMP,
           layoutMode:S.layoutMode, opFeather:S.opFeather,
+          llmSettings:S.llmSettings, enhanceByMode:S.enhanceByMode,
+          lastEnhancedByMode:S.lastEnhancedByMode, unloadAfterGeneration:S.unloadAfterGeneration,
         });
       };
 
@@ -1062,7 +1123,8 @@ app.registerExtension({
       requestAnimationFrame(()=>{
         _syncNodeRadius();
         if(typeof ResizeObserver!=="undefined"){
-          new ResizeObserver(_syncNodeRadius).observe(root.parentElement||root);
+          const resizeTarget=root.parentElement instanceof Node?root.parentElement:root;
+          if(resizeTarget instanceof Node) new ResizeObserver(_syncNodeRadius).observe(resizeTarget);
         }
       });
 
@@ -1349,7 +1411,40 @@ app.registerExtension({
       _dsRow.append(_dsTop,_dsHint);
       _dsApplyEnabled();
 
-      settingsOverlay.append(settHdr,modGrid,_kvNote,_baseNote,_loraBox,prefTitle,soundToggle.el,advUIToggle.el,extLoadersToggle.el,_dsRow);
+      // Prompt Enhancing (LM Studio)
+      const _llmBox=mk("div",{
+        border:`1px solid ${C.border}`,borderRadius:"8px",padding:"10px",
+        marginBottom:"12px",background:"rgba(255,255,255,.012)",display:"flex",flexDirection:"column",gap:"8px",
+      });
+      const _llmTitle=mk("div",{fontSize:"10px",fontWeight:"700",letterSpacing:".1em",textTransform:"uppercase",color:LIME});
+      tx(_llmTitle,"Prompt Enhancing · LM Studio");
+      const _llmGrid=mk("div",{display:"grid",gridTemplateColumns:"2fr 2fr 1fr",gap:"7px"});
+      const _llmField=(label,value,props,onCommit)=>{
+        const wrap=mk("label",{display:"flex",flexDirection:"column",gap:"4px",minWidth:"0"});
+        const lbl=mk("span",{fontSize:"9px",fontWeight:"700",color:C.muted,textTransform:"uppercase",letterSpacing:".05em"});tx(lbl,label);
+        const input=mk("input",{height:"28px",background:C.bg3,border:`1px solid ${C.border}`,borderRadius:"6px",color:C.text,fontSize:"10px",padding:"0 8px",outline:"none",boxSizing:"border-box",minWidth:"0",width:"100%"},{...props,value:String(value)});
+        input.onfocus=()=>input.style.borderColor=LIME;
+        input.onblur=()=>{input.style.borderColor=C.border;onCommit(input.value);persist();};
+        wrap.append(lbl,input);return{wrap,input};
+      };
+      const _llmUrl=_llmField("URL",S.llmSettings.baseUrl,{type:"text"},v=>S.llmSettings.baseUrl=v.trim()||DEFAULT_LLM_SETTINGS.baseUrl);
+      const _llmModel=_llmField("Model",S.llmSettings.model,{type:"text",placeholder:"Auto-detect loaded model"},v=>S.llmSettings.model=v.trim());
+      const _llmTemp=_llmField("Temperature",S.llmSettings.temperature,{type:"number",min:"0",max:"2",step:"0.05"},v=>S.llmSettings.temperature=Math.max(0,Math.min(2,parseFloat(v)||0)));
+      const _llmContext=_llmField("Context",S.llmSettings.contextLength,{type:"number",min:"4096",max:"262144",step:"1024"},v=>S.llmSettings.contextLength=Math.max(4096,Math.min(262144,parseInt(v)||32768)));
+      const _llmTokens=_llmField("Max output",S.llmSettings.maxTokens,{type:"number",min:"512",max:"32768",step:"256"},v=>S.llmSettings.maxTokens=Math.max(512,Math.min(32768,parseInt(v)||6000)));
+      const _llmTimeout=_llmField("Timeout (s)",S.llmSettings.timeoutSeconds,{type:"number",min:"10",max:"1800",step:"10"},v=>S.llmSettings.timeoutSeconds=Math.max(10,Math.min(1800,parseInt(v)||240)));
+      _llmUrl.wrap.style.gridColumn="span 2";
+      _llmGrid.append(_llmUrl.wrap,_llmTemp.wrap,_llmModel.wrap,_llmContext.wrap,_llmTokens.wrap,_llmTimeout.wrap);
+      const _llmSysLbl=mk("div",{fontSize:"9px",fontWeight:"700",color:C.muted,textTransform:"uppercase",letterSpacing:".05em"});tx(_llmSysLbl,"System prompt");
+      const _llmSystem=mk("textarea",{width:"100%",minHeight:"125px",resize:"vertical",background:C.bg3,border:`1px solid ${C.border}`,borderRadius:"6px",color:C.text,fontSize:"10px",lineHeight:"1.5",padding:"8px",outline:"none",boxSizing:"border-box",fontFamily:"inherit"},{value:S.llmSettings.systemPrompt||DEFAULT_LLM_SYSTEM_PROMPT});
+      _llmSystem.addEventListener("wheel",e=>e.stopPropagation(),{passive:true});
+      _llmSystem.onfocus=()=>_llmSystem.style.borderColor=LIME;
+      _llmSystem.onblur=()=>{_llmSystem.style.borderColor=C.border;S.llmSettings.systemPrompt=_llmSystem.value.trim()||DEFAULT_LLM_SYSTEM_PROMPT;persist();};
+      const _llmHint=mk("div",{fontSize:"9px",lineHeight:"1.45",color:C.muted});
+      tx(_llmHint,"Enhancing is switched on or off separately beside the prompt field in each mode. Context limits the available completion budget; reasoning models may reserve part of it for internal reasoning.");
+      _llmBox.append(_llmTitle,_llmGrid,_llmSysLbl,_llmSystem,_llmHint);
+
+      settingsOverlay.append(settHdr,modGrid,_kvNote,_baseNote,_llmBox,_loraBox,prefTitle,soundToggle.el,advUIToggle.el,extLoadersToggle.el,_dsRow);
 
       // ── Overlay helpers ───────────────────────────────────────────────────
       const openOverlay=(el)=>{
@@ -1668,6 +1763,9 @@ app.registerExtension({
         _fsNodeOverlay.focus();
         fsNodeBtn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5"/></svg>`;
         _inFullscreen=true;
+        if(KIOSK_MODE&&window.parent!==window){
+          window.parent.postMessage({type:"flux-klein-kiosk-ready"},window.location.origin);
+        }
       };
 
       const _exitFullscreen=()=>{
@@ -1686,6 +1784,59 @@ app.registerExtension({
         _fsNodeOverlay.style.display="none";
         fsNodeBtn.innerHTML=`<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>`;
         _inFullscreen=false;
+      };
+
+      const _enterKiosk=()=>{
+        if(!KIOSK_MODE) return;
+        if(!_isVueNodes()){
+          _enterFullscreen();
+          return;
+        }
+
+        // Nodes 2.0 owns the DOM widget and reparents it after every render. Instead of
+        // moving the root, elevate Vue's own widget container above a fixed backdrop.
+        if(!document.getElementById("fk-kiosk-style")){
+          const kioskStyle=document.createElement("style");
+          kioskStyle.id="fk-kiosk-style";
+          kioskStyle.textContent=`
+            #fk-kiosk-backdrop{position:fixed;inset:0;z-index:99980;background:#060608;}
+            body.fk-kiosk-active #graph-canvas-container .isolate:has(.fk-root){
+              position:fixed!important;inset:0!important;z-index:99991!important;
+              pointer-events:none!important;
+            }
+            body.fk-kiosk-active #graph-canvas-container .isolate:has(.fk-root)
+              .dom-widget:not(:has(.fk-root)){display:none!important;}
+            body.fk-kiosk-active .dom-widget:has(.fk-root){
+              position:fixed!important;left:50%!important;top:50%!important;
+              display:block!important;
+              width:${NODE_W}px!important;height:${NODE_H}px!important;
+              transform:translate(-50%,-50%) scale(var(--fk-kiosk-scale,1))!important;
+              transform-origin:center center!important;z-index:99991!important;
+              pointer-events:auto!important;opacity:1!important;clip-path:none!important;
+              will-change:auto!important;
+            }
+            body.fk-kiosk-active .dom-widget:has(.fk-root) .fk-root{
+              width:${NODE_W}px!important;height:${NODE_H}px!important;
+              position:relative!important;inset:auto!important;margin:0!important;
+              transform:none!important;transform-origin:center center!important;
+              border-radius:0!important;overflow:hidden!important;
+            }
+          `;
+          document.head.appendChild(kioskStyle);
+        }
+        if(!document.getElementById("fk-kiosk-backdrop")){
+          const backdrop=document.createElement("div");
+          backdrop.id="fk-kiosk-backdrop";
+          document.body.appendChild(backdrop);
+        }
+        const updateScale=()=>{
+          const scale=Math.min(window.innerWidth/NODE_W,window.innerHeight/NODE_H)*0.97;
+          document.body.style.setProperty("--fk-kiosk-scale",String(scale));
+        };
+        updateScale();
+        window.addEventListener("resize",updateScale,{passive:true});
+        document.body.classList.add("fk-kiosk-active");
+        requestAnimationFrame(()=>window.parent.postMessage({type:"flux-klein-kiosk-ready"},window.location.origin));
       };
 
       fsNodeBtn.onclick=()=>{ if(_inFullscreen) _exitFullscreen(); else _enterFullscreen(); };
@@ -1707,6 +1858,8 @@ app.registerExtension({
       topBarLeft.append(pillT2I,pillI2I,pillEdit,pillInpaint,pillFaceswap,pillPose);
 
       let _promptTARef=null; // set after promptTA is created
+      let _refreshEnhanceSwitch=()=>{};
+      let _refreshEnhancedPromptButton=()=>{};
 
       const _pillPromptKey=(p)=>p==="t2i"?"promptT2i":p==="edit"?"promptEdit":p==="inpaint"?"promptPaint":p==="i2i"?"promptI2i":p==="pose"?"promptPose":"promptFs";
 
@@ -1740,6 +1893,8 @@ app.registerExtension({
         });
         updatePillVisibility();
         updateSizeControls();
+        _refreshEnhanceSwitch();
+        _refreshEnhancedPromptButton();
       }
 
       // ── MAIN ROW ─────────────────────────────────────────────────────────
@@ -8430,9 +8585,61 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       _inspireBtn.onmouseleave=()=>{_inspireBtn.style.color=C.muted;_inspireBtn.style.borderColor=C.border;};
       _inspireBtn.onclick=_openInspire;
 
+      const _enhanceWrap=mk("div",{display:"flex",alignItems:"center",gap:"5px",padding:"2px 7px",border:`1px solid ${C.border}`,borderRadius:"5px",cursor:"pointer",userSelect:"none",flexShrink:"0"},{title:"Optimize this mode's prompt with LM Studio before generation"});
+      const _enhanceLbl=mk("span",{fontSize:"9px",fontWeight:"700",letterSpacing:".03em",color:C.muted});tx(_enhanceLbl,"Enhance");
+      const _enhanceTrack=mk("div",{width:"26px",height:"14px",borderRadius:"7px",position:"relative",background:C.dim,transition:"background .18s"});
+      const _enhanceThumb=mk("div",{position:"absolute",top:"2px",left:"2px",width:"10px",height:"10px",borderRadius:"50%",background:"#888",transition:"left .18s,background .18s"});
+      _enhanceTrack.appendChild(_enhanceThumb);_enhanceWrap.append(_enhanceLbl,_enhanceTrack);
+      _refreshEnhanceSwitch=()=>{
+        const on=!!S.enhanceByMode[activePill];
+        _enhanceTrack.style.background=on?LIME:C.dim;
+        _enhanceThumb.style.left=on?"14px":"2px";
+        _enhanceThumb.style.background=on?"#111":"#888";
+        _enhanceLbl.style.color=on?LIME:C.muted;
+        _enhanceWrap.style.borderColor=on?"rgba(240,255,65,.55)":C.border;
+      };
+      _enhanceWrap.onclick=()=>{
+        S.enhanceByMode[activePill]=!S.enhanceByMode[activePill];
+        _refreshEnhanceSwitch();persist();
+      };
+      _refreshEnhanceSwitch();
+
+      const _unloadWrap=mk("div",{display:"flex",alignItems:"center",gap:"5px",padding:"2px 7px",border:`1px solid ${C.border}`,borderRadius:"5px",cursor:"pointer",userSelect:"none",flexShrink:"0"},{title:"Unload all ComfyUI models and free GPU memory after generation"});
+      const _unloadLbl=mk("span",{fontSize:"9px",fontWeight:"700",letterSpacing:".03em",color:C.muted});tx(_unloadLbl,"Unload");
+      const _unloadTrack=mk("div",{width:"26px",height:"14px",borderRadius:"7px",position:"relative",background:C.dim,transition:"background .18s"});
+      const _unloadThumb=mk("div",{position:"absolute",top:"2px",left:"2px",width:"10px",height:"10px",borderRadius:"50%",background:"#888",transition:"left .18s,background .18s"});
+      _unloadTrack.appendChild(_unloadThumb);_unloadWrap.append(_unloadLbl,_unloadTrack);
+      const _refreshUnloadSwitch=()=>{
+        const on=!!S.unloadAfterGeneration;
+        _unloadTrack.style.background=on?LIME:C.dim;
+        _unloadThumb.style.left=on?"14px":"2px";
+        _unloadThumb.style.background=on?"#111":"#888";
+        _unloadLbl.style.color=on?LIME:C.muted;
+        _unloadWrap.style.borderColor=on?"rgba(240,255,65,.55)":C.border;
+      };
+      _unloadWrap.onclick=()=>{S.unloadAfterGeneration=!S.unloadAfterGeneration;_refreshUnloadSwitch();persist();};
+      _refreshUnloadSwitch();
+
+      const _viewEnhancedBtn=mk("button",{
+        background:"none",border:`1px solid ${C.border}`,cursor:"pointer",
+        padding:"2px 7px",color:C.muted,outline:"none",borderRadius:"5px",
+        fontSize:"9px",fontWeight:"700",letterSpacing:".03em",flexShrink:"0",
+        transition:"color .15s,border-color .15s,opacity .15s",
+      },{title:"View the last optimized JSON prompt"});
+      tx(_viewEnhancedBtn,"View JSON");
+      _refreshEnhancedPromptButton=()=>{
+        const available=!!(S.lastEnhancedByMode[activePill]||"").trim();
+        _viewEnhancedBtn.disabled=!available;
+        _viewEnhancedBtn.style.opacity=available?"1":".35";
+        _viewEnhancedBtn.style.cursor=available?"pointer":"default";
+        _viewEnhancedBtn.style.color=available?LIME:C.muted;
+        _viewEnhancedBtn.style.borderColor=available?"rgba(240,255,65,.45)":C.border;
+      };
+      _refreshEnhancedPromptButton();
+
       // Order: cap | Get Inspired | errChip | [spacer via marginLeft:auto on _ulBtn] | Add LoRA | Expand prompt
       promptCap.style.marginBottom="0";
-      promptHdr.append(promptCap,_inspireBtn,errMinChip,_ulBtn,_promptExpandBtn);
+      promptHdr.append(promptCap,_inspireBtn,_enhanceWrap,_unloadWrap,_viewEnhancedBtn,errMinChip,_ulBtn,_promptExpandBtn);
       promptWrap.appendChild(promptHdr);
 
       const promptTA=mk("textarea",{
@@ -8542,6 +8749,59 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       _promptOverlay.append(_promptOvHdr,_promptOvTA);
       _promptOverlay.addEventListener("keydown",e=>{if(e.key==="Escape")_closePromptOverlay();});
 
+      // Last enhanced prompt: inspect, edit, and reuse it without another LLM call.
+      const _enhancedOverlay=mk("div",{
+        position:"absolute",inset:"0",zIndex:"260",background:C.bg0,
+        display:"none",flexDirection:"column",padding:"14px",boxSizing:"border-box",gap:"10px",
+        opacity:"0",transition:"opacity .15s ease",
+      });
+      const _enhancedHdr=mk("div",{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px",flexShrink:"0"});
+      const _enhancedTitle=mk("div",{fontSize:"10px",fontWeight:"700",color:LIME,letterSpacing:".07em",textTransform:"uppercase"});
+      tx(_enhancedTitle,"Optimized JSON Prompt");
+      const _enhancedActions=mk("div",{display:"flex",alignItems:"center",gap:"7px"});
+      const _useEnhancedBtn=mk("button",{
+        background:LIME,border:"1px solid transparent",borderRadius:"6px",padding:"5px 12px",
+        color:"#111",fontSize:"10px",fontWeight:"700",cursor:"pointer",outline:"none",
+      });
+      tx(_useEnhancedBtn,"Use without Enhance");
+      const _closeEnhancedBtn=mk("button",{
+        background:"transparent",border:`1px solid ${C.borderH}`,borderRadius:"6px",padding:"5px 12px",
+        color:C.text,fontSize:"10px",fontWeight:"700",cursor:"pointer",outline:"none",
+      });
+      tx(_closeEnhancedBtn,"Close");
+      _enhancedActions.append(_useEnhancedBtn,_closeEnhancedBtn);_enhancedHdr.append(_enhancedTitle,_enhancedActions);
+      const _enhancedTA=mk("textarea",{
+        flex:"1",width:"100%",resize:"none",minHeight:"0",background:C.bg2,
+        border:`1px solid ${C.border}`,borderRadius:"8px",color:C.text,fontSize:"11px",
+        padding:"11px 13px",boxSizing:"border-box",outline:"none",lineHeight:"1.55",
+        fontFamily:"ui-monospace,Consolas,monospace",whiteSpace:"pre",overflow:"auto",
+      });
+      _enhancedTA.addEventListener("wheel",e=>e.stopPropagation(),{passive:true});
+      const _closeEnhanced=()=>{
+        _enhancedOverlay.style.opacity="0";
+        setTimeout(()=>_enhancedOverlay.style.display="none",160);
+      };
+      const _openEnhanced=()=>{
+        const value=S.lastEnhancedByMode[activePill]||"";
+        if(!value) return;
+        _enhancedTA.value=value;_enhancedOverlay.style.display="flex";
+        _enhancedOverlay.getBoundingClientRect();_enhancedOverlay.style.opacity="1";
+      };
+      _viewEnhancedBtn.onclick=_openEnhanced;
+      _closeEnhancedBtn.onclick=_closeEnhanced;
+      _useEnhancedBtn.onclick=()=>{
+        const value=_enhancedTA.value.trim();
+        if(!value) return;
+        S.lastEnhancedByMode[activePill]=value;
+        S.prompt=value;S[_pillPromptKey(activePill)]=value;
+        promptTA.value=value;_promptOvTA.value=value;
+        S.enhanceByMode[activePill]=false;
+        _refreshEnhanceSwitch();_refreshEnhancedPromptButton();persist();
+        _closeEnhanced();
+      };
+      _enhancedOverlay.append(_enhancedHdr,_enhancedTA);
+      _enhancedOverlay.addEventListener("keydown",e=>{if(e.key==="Escape")_closeEnhanced();});
+
       // ── GENERATION ────────────────────────────────────────────────────────
       const _resetGenBtn=()=>{
         genBtn.disabled=false;tx(genBtn,"Generate");
@@ -8609,6 +8869,19 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         // (no-op) image into those plain nodes prematurely.
         if(hadPlain && !_fkQueueGraph()){
           console.warn("[FluxKlein] Could not auto-run the graph to send the image downstream; press Run manually. The image is cached and will propagate on the next run.");
+        }
+      };
+
+      const afterGeneration=async()=>{
+        if(!S.unloadAfterGeneration) return;
+        try{
+          const response=await api.fetchApi("/free",{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({unload_models:true,free_memory:true}),
+          });
+          if(!response.ok) throw new Error(`HTTP ${response.status}`);
+        }catch(error){
+          console.warn("[FluxKlein] unload after generation:",fmtErr(error));
         }
       };
 
@@ -8810,7 +9083,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         // Auto-save off path: _batchShow already pushed the temp image to the output;
         // trigger the downstream auto-run here (execution_success won't, since
         // generating is already false by the time it fires for the temp/PreviewImage run).
-        autoSend();
+        Promise.resolve(autoSend()).finally(afterGeneration);
       };
 
       const showFinalBatch=(images)=>{
@@ -8888,7 +9161,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         // Make this node the active one for WS events — important when generation is
         // triggered programmatically (One Node chain poke) without a prior click/focus.
         _activeS=S; _activeShowFinal=showFinal; _activeShowFinalBatch=showFinalBatch;
-        _activeShowTemp=showTemp; _activeAutoSend=autoSend; _activeShowPreview=showPreview;
+        _activeShowTemp=showTemp; _activeAutoSend=autoSend; _activeAfterGeneration=afterGeneration; _activeShowPreview=showPreview;
         _activeResetBtn=resetBtn; _activeSetStage=setStage; _activeShowError=showError;
         _activePoseSkeleton=poseSkeleton; _activePromptIdRef=()=>_activePromptId;
 
@@ -9067,7 +9340,49 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
 
         // Prompt text input + LoRA/POSE triggers were resolved above (into _basePrompt) so the
         // saved metadata matches the generating prompt. Build the effective workflow prompt here.
-        const _effectivePrompt=await _buildPromptWithTriggers(_basePrompt);
+        let _effectivePrompt=await _buildPromptWithTriggers(_basePrompt);
+        const _enhanceActive=!!S.enhanceByMode[activePill]&&!!_effectivePrompt.trim();
+        if(_enhanceActive){
+          setStage("Enhancing prompt…",`LM Studio · ${S.llmSettings.model||"loaded model"}`,2);
+          try{
+            const llmResponse=await api.fetchApi("/flux_klein/enhance_prompt",{
+              method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({
+                prompt:_effectivePrompt,
+                width:getEffectiveW()||1024,
+                height:getEffectiveH()||1024,
+                mode:_snapMode,
+                operation:_snapMode==="inpaint"?_maskMode:"",
+                settings:{
+                  base_url:S.llmSettings.baseUrl,
+                  model:S.llmSettings.model,
+                  temperature:S.llmSettings.temperature,
+                  context_length:S.llmSettings.contextLength,
+                  max_tokens:S.llmSettings.maxTokens,
+                  timeout_seconds:S.llmSettings.timeoutSeconds,
+                  api_key:S.llmSettings.apiKey||"lm-studio",
+                  system_prompt:S.llmSettings.systemPrompt,
+                },
+              }),
+            });
+            const llmData=await llmResponse.json();
+            if(!llmResponse.ok||!llmData.ok||!llmData.json_prompt) throw new Error(llmData.error||`HTTP ${llmResponse.status}`);
+            _effectivePrompt=llmData.json_prompt;
+            S.lastEnhancedByMode[_snapMode]=_effectivePrompt;
+            if(activePill===_snapMode) _refreshEnhancedPromptButton();
+            persist();
+            if(S._pendingMeta){
+              S._pendingMeta.enhancedPrompt=_effectivePrompt;
+              S._pendingMeta.promptEnhanced=true;
+              S._pendingMeta.llmModel=llmData.model||S.llmSettings.model;
+            }
+            setStage("Generating…","Prompt enhanced · preparing FLUX workflow…",4);
+          }catch(e){
+            showError("Prompt enhancing failed: "+fmtErr(e));resetBtn();return;
+          }
+        } else if(S._pendingMeta){
+          S._pendingMeta.promptEnhanced=false;
+        }
 
         const useKV=(S.model||"").toLowerCase().includes("kv");
 
@@ -10721,6 +11036,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       root.appendChild(settingsOverlay);
       root.appendChild(galleryOverlay);
       root.appendChild(_promptOverlay);
+      root.appendChild(_enhancedOverlay);
       root.appendChild(_inspireOverlay);
       root.appendChild(_sketchOv);
       root.appendChild(_maskOv);
@@ -11177,6 +11493,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         },
       });
       _fkResizeToFit(this);
+      if(KIOSK_MODE) requestAnimationFrame(()=>requestAnimationFrame(_enterKiosk));
 
       // Nodes 2.0: hide the auto-injected node-type name badge rendered in the node footer.
       // The badge has class "bg-node-component-surface" (Tailwind) and contains the node type string.
@@ -11196,7 +11513,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
         if(typeof MutationObserver!=="undefined"){
           let obs=root;
           for(let i=0;i<4;i++) obs=obs?.parentElement||obs;
-          new MutationObserver(_hideNodes2Badge).observe(obs,{childList:true,subtree:true});
+          if(obs instanceof Node) new MutationObserver(_hideNodes2Badge).observe(obs,{childList:true,subtree:true});
         }
       });
 
@@ -11209,7 +11526,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       if(!window.__fluxklein_nodes) window.__fluxklein_nodes={};
       window.__fluxklein_nodes[this.id]={
         root,S,currentNode:this, // currentNode is repointed on workflow-switch reuse; _liveId() reads it
-        fns:{showFinal,showFinalBatch,showTemp,showPreview,resetBtn,setStage,showError,clearError,poseSkeleton,autoSend,getPromptId:()=>_activePromptId,triggerGenerate:_fkTriggerGenerate},
+        fns:{showFinal,showFinalBatch,showTemp,showPreview,resetBtn,setStage,showError,clearError,poseSkeleton,autoSend,afterGeneration,getPromptId:()=>_activePromptId,triggerGenerate:_fkTriggerGenerate,enterFullscreen:_enterFullscreen},
       };
       _curCacheKey=this.id;
 
@@ -11240,6 +11557,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       _activeShowFinalBatch=showFinalBatch;
       _activeShowTemp=showTemp;
       _activeAutoSend=autoSend;
+      _activeAfterGeneration=afterGeneration;
       _activeShowPreview=showPreview;
       _activeResetBtn=resetBtn;
       _activeSetStage=setStage;

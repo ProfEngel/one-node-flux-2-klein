@@ -11116,8 +11116,6 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       });
       const _shortcutsEl=mk("span",{color:"#444",letterSpacing:".03em"});
       tx(_shortcutsEl,"D · discover  G · gallery  Space · generate  F · fullscreen");
-      const _creditTxt=mk("div",{fontSize:"8px",color:"#555",letterSpacing:".04em",whiteSpace:"nowrap"});
-      tx(_creditTxt,"created by yanokusnir · enhanced by ProfEngel");
       _creditEl.style.justifyContent="";
       _creditEl.innerHTML="";
       _creditEl.style.pointerEvents="auto";
@@ -11150,14 +11148,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
 
       _scLeft.append(_scToggleBtn,_scBar);
 
-      // Right: credit
-      const _creditRight=mk("div",{
-        flex:"1",display:"flex",justifyContent:"flex-end",pointerEvents:"none",
-        paddingRight:"calc(min(480px,45%) + 18px)",boxSizing:"border-box",
-      });
-      _creditRight.appendChild(_creditTxt);
-
-      _creditEl.append(_scLeft,_creditRight);
+      _creditEl.append(_scLeft);
       root.appendChild(_creditEl);
 
 

@@ -909,6 +909,7 @@ app.registerExtension({
           enhanceByMode:{t2i:false,i2i:false,edit:false,inpaint:false,faceswap:false,pose:false,...(saved.enhanceByMode||{})},
           lastEnhancedByMode:{t2i:"",i2i:"",edit:"",inpaint:"",faceswap:"",pose:"",...(saved.lastEnhancedByMode||{})},
           unloadAfterGeneration:saved.unloadAfterGeneration!==undefined?saved.unloadAfterGeneration:false,
+          showAttribution:saved.showAttribution!==undefined?saved.showAttribution:false,
           // Outpaint seam feather (px the mask fades into the original). 0 = auto
           // (the previous min(48, edge/6) heuristic), so existing users see no change.
           opFeather:    saved.opFeather!==undefined?saved.opFeather:0,
@@ -948,6 +949,7 @@ app.registerExtension({
           layoutMode:S.layoutMode, opFeather:S.opFeather,
           llmSettings:S.llmSettings, enhanceByMode:S.enhanceByMode,
           lastEnhancedByMode:S.lastEnhancedByMode, unloadAfterGeneration:S.unloadAfterGeneration,
+          showAttribution:S.showAttribution,
         });
       };
 
@@ -1309,6 +1311,10 @@ app.registerExtension({
       tx(prefTitle,"Preferences");
       const soundToggle=Toggle("Notification sound on complete",soundEnabled,v=>{soundEnabled=v;persist();});
       const advUIToggle=Toggle("Advanced control (steps, CFG, sampler…)",S.advancedUI,v=>{S.advancedUI=v;persist();_advRefresh();},"#6450b4");
+      const attributionToggle=Toggle("Show creator attribution",S.showAttribution,v=>{
+        S.showAttribution=v;persist();
+        window.dispatchEvent(new CustomEvent("one-node:attribution-setting-changed",{detail:{enabled:v}}));
+      },"#6450b4");
 
       const _slotH=LiteGraph.NODE_SLOT_HEIGHT||20;
       const _extInputNames=["model","clip","vae"];
@@ -1445,7 +1451,7 @@ app.registerExtension({
       tx(_llmHint,"Enhancing is switched on or off separately beside the prompt field in each mode. Context limits the available completion budget; reasoning models may reserve part of it for internal reasoning.");
       _llmBox.append(_llmTitle,_llmGrid,_llmSysLbl,_llmSystem,_llmHint);
 
-      settingsOverlay.append(settHdr,modGrid,_kvNote,_baseNote,_llmBox,_loraBox,prefTitle,soundToggle.el,advUIToggle.el,extLoadersToggle.el,_dsRow);
+      settingsOverlay.append(settHdr,modGrid,_kvNote,_baseNote,_llmBox,_loraBox,prefTitle,soundToggle.el,advUIToggle.el,attributionToggle.el,extLoadersToggle.el,_dsRow);
 
       // ── Overlay helpers ───────────────────────────────────────────────────
       const openOverlay=(el)=>{
@@ -11116,6 +11122,14 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       });
       const _shortcutsEl=mk("span",{color:"#444",letterSpacing:".03em"});
       tx(_shortcutsEl,"D · discover  G · gallery  Space · generate  F · fullscreen");
+      const _attributionTxt=mk("span",{display:"none",fontSize:"8px",color:"#555",letterSpacing:".04em",whiteSpace:"nowrap"});
+      tx(_attributionTxt,"created by yanokusnir");
+      const _refreshAttribution=()=>{ _attributionTxt.style.display=S.showAttribution?"":"none"; };
+      _refreshAttribution();
+      window.addEventListener("one-node:attribution-setting-changed",event=>{
+        const enabled=!!event.detail?.enabled;
+        S.showAttribution=enabled; attributionToggle._setChecked(enabled); persist(); _refreshAttribution();
+      });
       _creditEl.style.justifyContent="";
       _creditEl.innerHTML="";
       _creditEl.style.pointerEvents="auto";
@@ -11146,7 +11160,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       _scBar.onclick=()=>{ _scBar.style.display="none"; _scToggleBtn.style.display=""; };
       _scToggleBtn.onclick=()=>{ _scToggleBtn.style.display="none"; _scBar.style.display="flex"; };
 
-      _scLeft.append(_scToggleBtn,_scBar);
+      _scLeft.append(_scToggleBtn,_scBar,_attributionTxt);
 
       _creditEl.append(_scLeft);
       root.appendChild(_creditEl);

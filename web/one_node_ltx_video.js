@@ -309,13 +309,15 @@ function initMediaUI(root) {
   const generateVoiceButton = primaryButton("Generate voice");
   const voiceStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
   voiceControls.append(voiceTemplateRow, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Spoken text"), voiceText, tx(el("div", { fontSize: "8px", color: "#777", fontWeight: "700", textTransform: "uppercase" }), "Reference transcript"), voiceRefText, voiceFields, refAudioFile.wrap, generateVoiceButton, voiceStatus);
-  const voicePreview = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const voicePreview = el("div", { display: "flex", flexDirection: "column", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const voicePreviewContent = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", flex: "1", minHeight: "0" });
   const voiceAudio = el("audio", { width: "100%" }, { controls: true });
   const voiceMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated voice will appear here");
   const voiceSend = el("div", { display: "flex", justifyContent: "center", gap: "7px" });
   const voiceToT2V = smallButton("Use in T2V"); const voiceToI2V = smallButton("Use in I2V");
   const voiceRuntime = createRuntimeMonitor(api);
-  voiceSend.append(voiceToT2V, voiceToI2V); voicePreview.append(voiceAudio, voiceMeta, voiceSend, voiceRuntime.root);
+  voiceRuntime.root.style.flexShrink = "0";
+  voiceSend.append(voiceToT2V, voiceToI2V); voicePreviewContent.append(voiceAudio, voiceMeta, voiceSend); voicePreview.append(voicePreviewContent, voiceRuntime.root);
   voicePanel.append(voiceControls, voicePreview);
   panels.voice = voicePanel;
 
@@ -345,13 +347,15 @@ function initMediaUI(root) {
   const generateSongButton = primaryButton("Generate song");
   const songStatus = tx(el("div", { minHeight: "14px", color: "#888", fontSize: "9px" }), "Ready");
   songControls.append(songTagsHeader, songTags, songLyricsHeader, songLyrics, songFields, generateSongButton, songStatus);
-  const songPreview = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const songPreview = el("div", { display: "flex", flexDirection: "column", gap: "12px", minWidth: "0", padding: "18px", background: "#101010", border: "1px solid #292929", borderRadius: "6px" });
+  const songPreviewContent = el("div", { display: "flex", flexDirection: "column", justifyContent: "center", gap: "12px", flex: "1", minHeight: "0" });
   const songAudio = el("audio", { width: "100%" }, { controls: true });
   const songMeta = tx(el("div", { color: "#777", fontSize: "9px", textAlign: "center" }), "Generated song will appear here");
   const songSend = el("div", { display: "flex", justifyContent: "center", gap: "7px" });
   const songToT2V = smallButton("Use in T2V"); const songToI2V = smallButton("Use in I2V");
   const songRuntime = createRuntimeMonitor(api);
-  songSend.append(songToT2V, songToI2V); songPreview.append(songAudio, songMeta, songSend, songRuntime.root);
+  songRuntime.root.style.flexShrink = "0";
+  songSend.append(songToT2V, songToI2V); songPreviewContent.append(songAudio, songMeta, songSend); songPreview.append(songPreviewContent, songRuntime.root);
   songPanel.append(songControls, songPreview);
   panels.song = songPanel;
 
@@ -362,7 +366,8 @@ function initMediaUI(root) {
   const settingsOverlay = el("div", { position: "absolute", inset: "0", zIndex: "8", display: "none", flexDirection: "column", gap: "8px", background: BG, padding: "12px 14px", boxSizing: "border-box" });
   const settingsTitle = tx(el("div", { color: LIME, fontWeight: "800", fontSize: "11px", flex: "1" }), "Media models");
   const closeSettings = smallButton("Close");
-  const settingsHead = el("div", { display: "flex", alignItems: "center" }); settingsHead.append(settingsTitle, closeSettings);
+  const mediaAttributionToggle = switchControl("Attribution", "Show or hide the creator attribution in OneNode");
+  const settingsHead = el("div", { display: "flex", alignItems: "center", gap: "7px" }); settingsHead.append(settingsTitle, mediaAttributionToggle, closeSettings);
   const settingsGrid = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "7px", overflow: "auto", paddingRight: "4px" });
   const modelFields = {};
   const modelGroups = {
@@ -384,6 +389,8 @@ function initMediaUI(root) {
     }
   }
   settingsOverlay.append(settingsHead, settingsGrid); overlay.append(settingsOverlay);
+  const mediaAttribution = tx(el("div", { position: "absolute", bottom: "4px", left: "14px", zIndex: "10", display: "none", color: "#555", fontSize: "8px", letterSpacing: ".04em", pointerEvents: "none" }), "created by yanokusnir");
+  overlay.append(mediaAttribution);
 
   // Media help with model names and download locations
   const helpOverlay = el("div", { position: "absolute", inset: "0", zIndex: "9", display: "none", flexDirection: "column", gap: "10px", background: BG, padding: "12px 14px", boxSizing: "border-box", overflow: "auto" });
@@ -438,6 +445,20 @@ function initMediaUI(root) {
   };
   for (const toggle of unloadToggles) toggle.onclick = () => setGlobalUnload(toggle.dataset.on !== "1");
   window.addEventListener("one-node:unload-setting-changed", refreshUnloadToggles);
+  const refreshAttribution = () => {
+    const enabled = !!sharedState().showAttribution;
+    mediaAttributionToggle.setOn(enabled);
+    mediaAttribution.style.display = enabled ? "block" : "none";
+  };
+  const setGlobalAttribution = enabled => {
+    const shared = sharedState();
+    shared.showAttribution = !!enabled;
+    localStorage.setItem(IMAGE_STATE_KEY, JSON.stringify(shared));
+    window.dispatchEvent(new CustomEvent("one-node:attribution-setting-changed", { detail: { enabled: !!enabled } }));
+    refreshAttribution();
+  };
+  mediaAttributionToggle.onclick = () => setGlobalAttribution(mediaAttributionToggle.dataset.on !== "1");
+  window.addEventListener("one-node:attribution-setting-changed", refreshAttribution);
   let voiceTemplates = [];
   const renderVoiceTemplates = (selectedName = voiceTemplateSelectField.input.value) => {
     voiceTemplateSelectField.input.replaceChildren(tx(el("option", {}, { value: "" }), "Choose template..."));
@@ -905,6 +926,7 @@ function initMediaUI(root) {
   };
 
   loadVoiceTemplates();
+  refreshAttribution();
   refresh();
 }
 

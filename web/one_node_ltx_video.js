@@ -125,9 +125,9 @@ function initMediaUI(root) {
   modeBar.append(pills.t2v, pills.i2v, pills.clonevoice, pills.song);
 
   const overlay = el("div", {
-    position: "absolute", left: "0", right: "0", bottom: "0", zIndex: "42",
+    position: "absolute", left: "0", right: "0", bottom: "0", zIndex: "900",
     display: "none", background: BG, color: "#dedede", padding: "10px 14px 12px",
-    boxSizing: "border-box", fontFamily: "inherit", overflow: "hidden",
+    boxSizing: "border-box", fontFamily: "inherit", overflow: "hidden", isolation: "isolate",
   });
   const placeOverlay = () => {
     const rootBox = root.getBoundingClientRect();

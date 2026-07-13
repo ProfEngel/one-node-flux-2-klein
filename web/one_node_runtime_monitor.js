@@ -32,6 +32,7 @@ export function createRuntimeMonitor(api, { compact = false } = {}) {
   const progressTrack = make("div", { height: "3px", borderRadius: "2px", background: "#292929", overflow: "hidden" });
   const progressFill = make("div", { width: "0%", height: "100%", background: LIME, transition: "width .25s ease" });
   progressTrack.append(progressFill);
+  if (compact) progressTrack.style.display = "none";
 
   const metrics = make("div", { display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: compact ? "5px" : "7px" });
   const metric = label => {

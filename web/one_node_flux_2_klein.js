@@ -7308,7 +7308,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       previewBox.append(placeholder,finalImg,comparerWrap,previewUseWrap,previewSaveBtn,previewDelBtn,autoSaveTog,progWrap);
       rightPanel.appendChild(previewBox);
       const runtimeFooter=mk("div",{
-        position:"absolute",left:"0",right:"0",bottom:"13px",padding:"0 12px",
+        position:"absolute",right:"12px",bottom:"6px",width:"min(480px,45%)",
         boxSizing:"border-box",zIndex:"4",pointerEvents:"none",
       });
       runtimeFooter.appendChild(runtimeMonitor.root);
@@ -11089,7 +11089,6 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       // Layout mode places promptWrap either in the left column ("tall" → preview
       // gets full height, good for portrait) or full-width under the preview ("classic").
       _applyLayout(S.layoutMode);
-      pad.appendChild(runtimeFooter);
       root.appendChild(helpOverlay);
       root.appendChild(settingsOverlay);
       root.appendChild(galleryOverlay);
@@ -11100,6 +11099,7 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       root.appendChild(_maskOv);
       scrollEl.appendChild(pad);
       root.appendChild(scrollEl);
+      root.appendChild(runtimeFooter);
 
       // ── Esc in any number/text input → blur (dismiss focus) ──────────────
       root.addEventListener("keydown",(e)=>{
@@ -11151,7 +11151,10 @@ width:"34px",background:C.bg2,border:`1px solid ${C.border}`,borderRadius:"4px",
       _scLeft.append(_scToggleBtn,_scBar);
 
       // Right: credit
-      const _creditRight=mk("div",{flex:"1",display:"flex",justifyContent:"flex-end",pointerEvents:"none"});
+      const _creditRight=mk("div",{
+        flex:"1",display:"flex",justifyContent:"flex-end",pointerEvents:"none",
+        paddingRight:"calc(min(480px,45%) + 18px)",boxSizing:"border-box",
+      });
       _creditRight.appendChild(_creditTxt);
 
       _creditEl.append(_scLeft,_creditRight);

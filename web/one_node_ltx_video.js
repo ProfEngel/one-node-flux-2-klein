@@ -49,6 +49,8 @@ const DEFAULT_STATE = {
     upscaler: "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
     t2vLora: "ltx2.3\\ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors",
     i2vLora: "ltx2.3\\ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors",
+    t2vLoraStrength: 0.6,
+    i2vLoraStrength: 0.6,
     voiceRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
     voiceSource: "HuggingFace",
     voicePrecision: "bf16",
@@ -257,6 +259,11 @@ function initMediaUI(root) {
   const durationField = numberField("Seconds", state.duration, 1, 120);
   const seedField = numberField("Seed - 0 auto", state.seed, 0, 999999999999999);
   videoFields.append(widthField.wrap, heightField.wrap, fpsField.wrap, durationField.wrap, seedField.wrap);
+  const videoLoraFields = el("div", { display: "grid", gridTemplateColumns: "minmax(0,1fr) 92px", gap: "6px" });
+  const videoLoraSelect = selectField("LTX LoRA", "__none__", ["__none__"]);
+  const videoLoraStrength = numberField("Strength", 0.6, -3, 3, 0.05);
+  const videoLoraLabel = videoLoraSelect.wrap.querySelector("span");
+  videoLoraFields.append(videoLoraSelect.wrap, videoLoraStrength.wrap);
   const videoAssets = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" });
   const imageFile = fileControl("Upload first frame", "image/*");
   const audioFile = fileControl("Optional audio", "audio/*");
@@ -280,7 +287,7 @@ function initMediaUI(root) {
   const videoMeta = tx(el("div", { minHeight: "18px", color: "#777", fontSize: "9px", textAlign: "right" }), "Generated video will appear here");
   const videoRuntime = createRuntimeMonitor(api);
   videoPreview.append(video, videoMeta, videoRuntime.root);
-  videoControls.append(videoHeader, promptHeader, promptTA, jsonPanel, videoFields, videoAssets, videoActions, videoStatus);
+  videoControls.append(videoHeader, promptHeader, promptTA, jsonPanel, videoFields, videoLoraFields, videoAssets, videoActions, videoStatus);
   videoPanel.append(videoControls, videoPreview);
   panels.video = videoPanel;
 
@@ -375,7 +382,7 @@ function initMediaUI(root) {
   const settingsGrid = el("div", { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "7px", overflow: "auto", paddingRight: "4px" });
   const modelFields = {};
   const modelGroups = {
-    "LTX 2.3 video": { unet: "Diffusion model", clip: "Text encoder", connector: "Connector", videoVae: "Video VAE", audioVae: "Audio VAE", upscaler: "Latent upscaler", t2vLora: "T2V LoRA", i2vLora: "I2V LoRA" },
+    "LTX 2.3 video": { unet: "Diffusion model", clip: "Text encoder", connector: "Connector", videoVae: "Video VAE", audioVae: "Audio VAE", upscaler: "Latent upscaler", t2vLora: "T2V LoRA", t2vLoraStrength: "T2V LoRA strength", i2vLora: "I2V LoRA", i2vLoraStrength: "I2V LoRA strength" },
     "Qwen3 CloneVoice": { voiceRepo: "Repository ID", voiceSource: "Source", voicePrecision: "Precision", voiceAttention: "Attention", voiceLocalPath: "Local model path", voiceMaxTokens: "Max output tokens", voiceRefSeconds: "Reference max seconds" },
     "ACE-Step Song": { songUnet: "Diffusion model", songClip1: "Text encoder 1", songClip2: "Text encoder 2", songVae: "Audio VAE", songWeightDtype: "Weight dtype", songDevice: "Encoder device", songShift: "Model shift", songSteps: "Sampling steps", songCfg: "CFG" },
   };
@@ -494,6 +501,37 @@ function initMediaUI(root) {
     if (!response.ok || !result.ok) throw new Error(result.error || `Template save HTTP ${response.status}`);
     renderVoiceTemplates(selectedName);
   };
+  let availableLtxLoras = [];
+  const activeLoraKey = () => state.mode === "i2v" ? "i2vLora" : "t2vLora";
+  const activeLoraStrengthKey = () => state.mode === "i2v" ? "i2vLoraStrength" : "t2vLoraStrength";
+  const refreshVideoLoraControls = () => {
+    const loraKey = activeLoraKey();
+    const selected = state.models[loraKey] || "";
+    const options = ["__none__", ...new Set([...availableLtxLoras, state.models.t2vLora, state.models.i2vLora].filter(Boolean))];
+    videoLoraSelect.input.replaceChildren(...options.map(value => tx(el("option", {}, { value }), value === "__none__" ? "No LoRA" : value)));
+    videoLoraSelect.input.value = selected || "__none__";
+    videoLoraLabel.textContent = `${state.mode.toUpperCase()} LoRA`;
+    videoLoraStrength.input.value = String(state.models[activeLoraStrengthKey()] ?? 0.6);
+  };
+  const loadLtxLoras = async () => {
+    try {
+      const response = await api.fetchApi("/flux_klein/models");
+      const result = await response.json();
+      if (!response.ok) throw new Error(`Models HTTP ${response.status}`);
+      availableLtxLoras = (result.loras || []).filter(name => /(^|[\\/])ltx|ltx[-_.]?2/i.test(name));
+    } catch (error) { console.warn("[OneNode] Could not list LTX LoRAs", error); }
+    refreshVideoLoraControls();
+  };
+  videoLoraSelect.input.onchange = () => {
+    const key = activeLoraKey();
+    state.models[key] = videoLoraSelect.input.value === "__none__" ? "" : videoLoraSelect.input.value;
+    if (modelFields[key]) modelFields[key].value = state.models[key];
+    persist();
+  };
+  videoLoraStrength.input.onchange = () => {
+    state.models[activeLoraStrengthKey()] = clampFloat(videoLoraStrength.input.value, -3, 3, 0.6);
+    persist();
+  };
   const refresh = () => {
     const active = overlay.style.display !== "none";
     setBaseContentHidden(active);
@@ -521,6 +559,7 @@ function initMediaUI(root) {
       reviewButton.disabled = !state.enhanced[state.mode];
       reviewButton.style.opacity = state.enhanced[state.mode] ? "1" : ".4";
       widthField.input.value = state.width[state.mode]; heightField.input.value = state.height[state.mode];
+      refreshVideoLoraControls();
     }
     refAudioFile.caption.textContent = state.voice.refAudioLabel || state.voice.refAudioName || "Reference voice audio";
     refreshUnloadToggles();
@@ -868,7 +907,17 @@ function initMediaUI(root) {
       graph[`${prefix}:video_vae`].inputs.vae_name = state.models.videoVae;
       graph[`${prefix}:audio_vae`].inputs.vae_name = state.models.audioVae;
       graph[`${prefix}:upscaler`].inputs.model_name = state.models.upscaler;
-      graph[`${prefix}:lora`].inputs.lora_name = state.mode === "t2v" ? state.models.t2vLora : state.models.i2vLora;
+      const loraKey = state.mode === "t2v" ? "t2vLora" : "i2vLora";
+      const loraStrengthKey = state.mode === "t2v" ? "t2vLoraStrength" : "i2vLoraStrength";
+      const loraName = state.models[loraKey] || "";
+      if (loraName) {
+        graph[`${prefix}:lora`].inputs.lora_name = loraName;
+        graph[`${prefix}:lora`].inputs.strength_model = clampFloat(state.models[loraStrengthKey], -3, 3, 0.6);
+      } else if (state.mode === "t2v") {
+        graph[`${prefix}:guider2`].inputs.model = [`${prefix}:model`, 0];
+      } else {
+        graph[`${prefix}:chunk`].inputs.model = [`${prefix}:model`, 0];
+      }
       if (state.audioName) { graph["LTX:external_audio"] = { class_type: "LoadAudio", inputs: { audio: state.audioName }, _meta: { title: "External Audio" } }; graph[`${prefix}:create`].inputs.audio = ["LTX:external_audio", 0]; }
       setStatus(videoStatus, "LTX video is generating...");
       const asset = await queueGraph(graph, `${prefix}:save`, "video", videoRuntime);
@@ -930,6 +979,7 @@ function initMediaUI(root) {
   };
 
   loadVoiceTemplates();
+  loadLtxLoras();
   refreshAttribution();
   refresh();
 }
